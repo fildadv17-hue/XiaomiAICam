@@ -181,11 +181,9 @@ class MainActivity : AppCompatActivity() {
                     val crop = Bitmap.createBitmap(b, (b.width - cw) / 2, (b.height - ch) / 2, cw, ch)
                     val sc = (1600f / max(cw, ch)).coerceIn(1f, 2.5f)
                     val tw = (cw * sc).roundToInt(); val th = (ch * sc).roundToInt()
-                    // Vlevo ukážeme běžný výřez, vpravo pravou 16-bodovou bikubickou rekonstrukci + směrové AI
                     rawBmp = Bitmap.createScaledBitmap(crop, tw, th, false)
-                    val preClean = directionalAi(crop, 0.55f, 0.50f, 1.0f, false)
-                    val bicubic = bicubicScale(preClean, tw, th)
-                    aiBmp = directionalAi(bicubic, 0.70f, 0.45f, 1.12f, leicaAuth)
+                    val bic = bicubicScale(directionalAi(crop, 0.55f, 0.50f, 1.0f, false), tw, th)
+                    aiBmp = directionalAi(bic, 0.70f, 0.45f, 1.12f, leicaAuth)
                     runOnUiThread {
                         prog.visibility = View.GONE; sbSplit.progress = 50; sbS.progress = 70; sbD.progress = 45; sbC.progress = 112
                         camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit()
@@ -225,45 +223,39 @@ class MainActivity : AppCompatActivity() {
     private fun cubic(v0: Float, v1: Float, v2: Float, v3: Float, t: Float): Float {
         val a = -0.5f * v0 + 1.5f * v1 - 1.5f * v2 + 0.5f * v3
         val b = v0 - 2.5f * v1 + 2f * v2 - 0.5f * v3
-        val c = -0.5f * v0 + 0.5f * v2
-        return ((a * t + b) * t + c) * t + v1
+        return ((a * t + b) * t + (-0.5f * v0 + 0.5f * v2)) * t + v1
     }
 
-    // Pravá 4x4 Keysova bikubická interpolace - vytvoří čisté šikmé hrany s nulovou pixelací a bez rozmazání
     private fun bicubicScale(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
         val sw = src.width; val sh = src.height; val sp = IntArray(sw * sh); src.getPixels(sp, 0, sw, 0, 0, sw, sh)
-        val dp = IntArray(dstW * dstH)
-        val xRatio = sw.toFloat() / dstW; val yRatio = sh.toFloat() / dstH
+        val dp = IntArray(dstW * dstH); val xR = sw.toFloat() / dstW; val yR = sh.toFloat() / dstH
+        val rR = FloatArray(4); val gR = FloatArray(4); val bR = FloatArray(4)
         for (y in 0 until dstH) {
-            val fy = (y + 0.5f) * yRatio - 0.5f; val iy = floor(fy).toInt(); val ty = fy - iy
+            val fy = (y + 0.5f) * yR - 0.5f; val iy = floor(fy).toInt(); val ty = fy - iy
             for (x in 0 until dstW) {
-                val fx = (x + 0.5f) * xRatio - 0.5f; val ix = floor(fx).toInt(); val tx = fx - ix
-                var rAcc = 0f; var gAcc = 0f; var bAcc = 0f
-                val rRow = FloatArray(4); val gRow = FloatArray(4); val bRow = FloatArray(4)
+                val fx = (x + 0.5f) * xR - 0.5f; val ix = floor(fx).toInt(); val tx = fx - ix
                 for (m in -1..2) {
                     val py = (iy + m).coerceIn(0, sh - 1) * sw
                     val p0 = sp[py + (ix - 1).coerceIn(0, sw - 1)]; val p1 = sp[py + ix.coerceIn(0, sw - 1)]
                     val p2 = sp[py + (ix + 1).coerceIn(0, sw - 1)]; val p3 = sp[py + (ix + 2).coerceIn(0, sw - 1)]
-                    rRow[m + 1] = cubic((p0 shr 16 and 0xFF).toFloat(), (p1 shr 16 and 0xFF).toFloat(), (p2 shr 16 and 0xFF).toFloat(), (p3 shr 16 and 0xFF).toFloat(), tx)
-                    gRow[m + 1] = cubic((p0 shr 8 and 0xFF).toFloat(), (p1 shr 8 and 0xFF).toFloat(), (p2 shr 8 and 0xFF).toFloat(), (p3 shr 8 and 0xFF).toFloat(), tx)
-                    bRow[m + 1] = cubic((p0 and 0xFF).toFloat(), (p1 and 0xFF).toFloat(), (p2 and 0xFF).toFloat(), (p3 and 0xFF).toFloat(), tx)
+                    rR[m + 1] = cubic((p0 shr 16 and 0xFF).toFloat(), (p1 shr 16 and 0xFF).toFloat(), (p2 shr 16 and 0xFF).toFloat(), (p3 shr 16 and 0xFF).toFloat(), tx)
+                    gR[m + 1] = cubic((p0 shr 8 and 0xFF).toFloat(), (p1 shr 8 and 0xFF).toFloat(), (p2 shr 8 and 0xFF).toFloat(), (p3 shr 8 and 0xFF).toFloat(), tx)
+                    bR[m + 1] = cubic((p0 and 0xFF).toFloat(), (p1 and 0xFF).toFloat(), (p2 and 0xFF).toFloat(), (p3 and 0xFF).toFloat(), tx)
                 }
-                rAcc = cubic(rRow[0], rRow[1], rRow[2], rRow[3], ty)
-                gAcc = cubic(gRow[0], gRow[1], gRow[2], gRow[3], ty)
-                bAcc = cubic(bRow[0], bRow[1], bRow[2], bRow[3], ty)
-                dp[y * dstW + x] = (0xFF shl 24) or (rAcc.roundToInt().coerceIn(0, 255) shl 16) or (gAcc.roundToInt().coerceIn(0, 255) shl 8) or bAcc.roundToInt().coerceIn(0, 255)
+                val rA = cubic(rR[0], rR[1], rR[2], rR[3], ty).roundToInt().coerceIn(0, 255)
+                val gA = cubic(gR[0], gR[1], gR[2], gR[3], ty).roundToInt().coerceIn(0, 255)
+                val bA = cubic(bR[0], bR[1], bR[2], bR[3], ty).roundToInt().coerceIn(0, 255)
+                dp[y * dstW + x] = (0xFF shl 24) or (rA shl 16) or (gA shl 8) or bA
             }
         }
         return Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888).apply { setPixels(dp, 0, dstW, 0, 0, dstW, dstH) }
     }
 
-    // Směrové AI: Vyhlazuje POUZE podél linie hrany (nikoliv přes ni!) a zaostřuje kolmo s ochranou proti přepalu (Clamp)
     private fun directionalAi(src: Bitmap, sh: Float, dn: Float, co: Float, auth: Boolean): Bitmap {
         val w = src.width; val h = src.height; val p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); val out = p.clone()
         val lum = IntArray(w * h)
         for (i in p.indices) { val c = p[i]; lum[i] = ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 150 + (c and 0xFF) * 29) shr 8 }
-        val gain = sh * 1.6f; val flatThr = (12 + dn * 28).toInt(); val flatBlend = (dn * 0.7f).coerceIn(0f, 0.75f)
-
+        val gain = sh * 1.6f; val flatThr = (12 + dn * 28).toInt(); val flatBl = (dn * 0.7f).coerceIn(0f, 0.75f)
         for (y in 1 until h - 1) {
             val r = y * w
             for (x in 1 until w - 1) {
@@ -272,21 +264,13 @@ class MainActivity : AppCompatActivity() {
                 val lTL = lum[i - w - 1]; val lTR = lum[i - w + 1]; val lBL = lum[i + w - 1]; val lBR = lum[i + w + 1]
                 val gx = abs((lTR + 2 * lR + lBR) - (lTL + 2 * lL + lBL))
                 val gy = abs((lBL + 2 * lB + lBR) - (lTL + 2 * lT + lTR))
-                val edge = (gx + gy) shr 2
-
-                val minL = min(min(lT, lB), min(lL, lR)); val maxL = max(max(lT, lB), max(lL, lR))
-                val avgAll = (lT + lB + lL + lR + lTL + lTR + lBL + lBR) shr 3
-
-                val newLum = if (edge > 16) {
-                    // Směrové vyhlazení podél hrany + kolmé doostření zaříznuté do [minL, maxL] (0% rozmazání, 0% pixelace)
-                    val along = if (gx > gy) (lT + lB + lC * 2) shr 2 else (lL + lR + lC * 2) shr 2
-                    val sharp = (along + (lC - avgAll) * gain).roundToInt()
-                    sharp.coerceIn(minL - 8, maxL + 8)
-                } else if (abs(lC - avgAll) < flatThr) {
-                    (lC * (1f - flatBlend) + avgAll * flatBlend).roundToInt()
-                } else lC
-
-                val d = newLum - lC
+                val lo = min(min(lT, lB), min(lL, lR)) - 6; val hi = max(max(lT, lB), max(lL, lR)) + 6
+                val avg = (lT + lB + lL + lR + lTL + lTR + lBL + lBR) shr 3
+                val nL = if ((gx + gy) shr 2 > 16) {
+                    val al = if (gx > gy) (lT + lB + lC * 2) shr 2 else (lL + lR + lC * 2) shr 2
+                    (al + (lC - avg) * gain).roundToInt().coerceIn(min(lo, hi), max(lo, hi))
+                } else if (abs(lC - avg) < flatThr) (lC * (1f - flatBl) + avg * flatBl).roundToInt() else lC
+                val d = nL - lC
                 out[i] = (0xFF shl 24) or ((c shr 16 and 0xFF) + d).coerceIn(0, 255).shl(16) or ((c shr 8 and 0xFF) + d).coerceIn(0, 255).shl(8) or ((c and 0xFF) + d).coerceIn(0, 255)
             }
         }
@@ -301,3 +285,19 @@ class MainActivity : AppCompatActivity() {
     private fun upscale2x() {
         val ai = aiBmp ?: return; val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
         val s = sbS.progress / 100f; val d = sbD.progress / 100f; val c = sbC.progress / 100f; val auth = leicaAuth
+        exec.execute {
+            val sc = min(1.7f, 2800f / max(ai.width, ai.height))
+            val tw = (ai.width * sc).roundToInt(); val th = (ai.height * sc).roundToInt()
+            rawBmp = Bitmap.createScaledBitmap(orig, tw, th, false)
+            aiBmp = directionalAi(bicubicScale(ai, tw, th), (s + 0.15f).coerceAtMost(1f), d, c, auth)
+            runOnUiThread { prog.visibility = View.GONE; renderSplit() }
+        }
+    }
+
+    private fun saveImg() {
+        val b = aiBmp ?: return; prog.visibility = View.VISIBLE
+        exec.execute {
+            val cv = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "Xiaomi14T_${System.currentTimeMillis()}.jpg")
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.
