@@ -1,10 +1,12 @@
 package com.example.xiaomiaicam
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
+import android.hardware.camera2.CaptureRequest
 import android.os.*
 import android.provider.MediaStore
 import android.view.*
@@ -12,6 +14,7 @@ import android.view.ViewGroup.LayoutParams.*
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -29,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var prog: ProgressBar
     private lateinit var swAi: Switch
+    private lateinit var btnLeica: Button
     private lateinit var sbB: SeekBar
     private lateinit var sbC: SeekBar
     private lateinit var sbS: SeekBar
@@ -38,13 +42,14 @@ class MainActivity : AppCompatActivity() {
     private var cam: androidx.camera.core.Camera? = null
     private val exec = Executors.newSingleThreadExecutor()
     private var curZoom = 1f
-    private var maxHw = 10f
+    private var maxHw = 20f
     private var swZoom = 1f
+    private var leicaAuthentic = false
     private var baseBmp: Bitmap? = null
     private var edBmp: Bitmap? = null
 
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        if (it) startCam() else Toast.makeText(this, "Camera permission required", Toast.LENGTH_LONG).show()
+        if (it) startCam() else Toast.makeText(this, "Povol přístup ke kameře", Toast.LENGTH_LONG).show()
     }
 
     override fun onCreate(s: Bundle?) {
@@ -63,17 +68,36 @@ class MainActivity : AppCompatActivity() {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         camLay = FrameLayout(this)
         pv = PreviewView(this)
-        camLay.addView(FrameLayout(this).apply { clipChildren = true; addView(pv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        camLay.addView(FrameLayout(this).apply {
+            clipChildren = true
+            addView(pv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
         val top = LinearLayout(this).apply {
-            setPadding(40, 28, 40, 28); gravity = Gravity.CENTER_VERTICAL
+            setPadding(36, 24, 36, 24); gravity = Gravity.CENTER_VERTICAL
             background = glass(0x55FFFFFF, 0x22FFFFFF, 0x99FFFFFF, 60f)
         }
-        tvZoom = TextView(this).apply { text = "1.0x LIQUID AI"; setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD }
-        swAi = Switch(this).apply { text = "Pure AI "; isChecked = true; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+        tvZoom = TextView(this).apply {
+            text = "14T LEICA • 1.0x"
+            setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+        }
+        btnLeica = Button(this).apply {
+            text = "LEICA VIBRANT"
+            setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xCCDF0024, 0x99990018, 0xAAFFFFFF, 36f)
+            setPadding(24, 0, 24, 0)
+            setOnClickListener {
+                leicaAuthentic = !leicaAuthentic
+                text = if (leicaAuthentic) "LEICA AUTHENTIC" else "LEICA VIBRANT"
+            }
+        }
+        swAi = Switch(this).apply {
+            text = " AI "; isChecked = true; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+        }
         top.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        top.addView(btnLeica, LinearLayout.LayoutParams(WRAP_CONTENT, 84).apply { rightMargin = 16 })
         top.addView(swAi)
-        camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(28, 56, 28, 0) })
+        camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(24, 52, 24, 0) })
 
         val bot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL; setPadding(36, 32, 36, 40); gravity = Gravity.CENTER
@@ -81,7 +105,7 @@ class MainActivity : AppCompatActivity() {
         }
         val sbZ = SeekBar(this).apply { max = 990 }
         val zRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        listOf(1f, 5f, 10f, 50f, 100f).forEach { z ->
+        listOf(1f, 2f, 4f, 20f, 100f).forEach { z ->
             zRow.addView(Button(this).apply {
                 text = "${z.toInt()}x"; setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
                 background = glass(0x40FFFFFF, 0x15FFFFFF, 0x77FFFFFF, 36f)
@@ -96,8 +120,8 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         bot.addView(Button(this).apply {
-            text = "CAPTURE • PURE LIQUID AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
-            background = glass(0xEEFF7700, 0xBBFF2200, 0xCCFFFFFF, 60f)
+            text = "CAPTURE • XIAOMI 14T AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xEEFF6900, 0xBBCC2200, 0xCCFFFFFF, 60f)
             setOnClickListener { takePhoto() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 138))
         camLay.addView(bot, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 36) })
@@ -118,16 +142,16 @@ class MainActivity : AppCompatActivity() {
             background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 56f)
         }
         card.addView(Button(this).apply {
-            text = "✨ Pure AI 2x Super-Res (Smooth + Crisp)"
+            text = "✨ Xiaomi 14T AI 2x Super-Res (Ultra Clean)"
             setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
             background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 44f)
             setOnClickListener { upscale2x() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 118).apply { bottomMargin = 12 })
 
-        sbB = slider(card, "HDR Brightness", 200, 100)
-        sbC = slider(card, "Natural Contrast", 200, 100)
-        sbS = slider(card, "Clean Edge Sharpness", 100, 25)
-        sbD = slider(card, "Silk AI Denoise", 100, 35)
+        sbB = slider(card, "Leica Exposure", 200, 100)
+        sbC = slider(card, "Micro Contrast", 200, 100)
+        sbS = slider(card, "Optical Acutance (No-Grain)", 100, 20)
+        sbD = slider(card, "IMX906 Chroma Denoise", 100, 40)
 
         val act = LinearLayout(this)
         act.addView(Button(this).apply {
@@ -162,12 +186,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @SuppressLint("UnsafeOptInUsageError")
     private fun startCam() {
         val f = ProcessCameraProvider.getInstance(this)
         f.addListener({
             val p = f.get()
             val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
-            imgCap = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
+            val capBuilder = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setJpegQuality(100)
+            Camera2Interop.Extender(capBuilder)
+                .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+                .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+                .setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
+            imgCap = capBuilder.build()
             try {
                 p.unbindAll()
                 cam = p.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, prev, imgCap)
@@ -182,7 +214,8 @@ class MainActivity : AppCompatActivity() {
         cam?.cameraControl?.setZoomRatio(hw)
         swZoom = (curZoom / hw).coerceAtLeast(1f)
         pv.scaleX = swZoom; pv.scaleY = swZoom
-        tvZoom.text = String.format("%.1fx LIQUID AI", curZoom)
+        val lens = if (curZoom >= 2f) "TELE 50MP" else "IMX906 50MP"
+        tvZoom.text = String.format("14T %s • %.1fx", lens, curZoom)
     }
 
     private fun takePhoto() {
@@ -194,21 +227,20 @@ class MainActivity : AppCompatActivity() {
                 val buf: ByteBuffer = img.planes[0].buffer
                 val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
                 img.close()
-                val ai = swAi.isChecked; val z = curZoom
+                val ai = swAi.isChecked; val z = curZoom; val auth = leicaAuthentic
                 exec.execute {
                     var b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
                     b = crop(b, swZoom)
                     if (ai) {
-                        val passes = if (z > 8f) 2 else 1
-                        repeat(passes) { b = silkDenoise(b, 0.75f) }
-                        b = cleanUnsharpMask(b, if (z > 10f) 0.55f else 0.45f)
-                        b = color(b, 3f, 1.06f, 1.08f)
+                        b = smoothBlurDenoise(b, if (z > 8f) 0.70f else 0.45f)
+                        b = softHaloSharpen(b, if (z > 8f) 0.35f else 0.25f)
                     }
+                    b = if (auth) color(b, -4f, 1.14f, 0.92f) else color(b, 2f, 1.06f, 1.14f)
                     baseBmp = b; edBmp = b
                     runOnUiThread {
                         prog.visibility = View.GONE
-                        sbB.progress = 100; sbC.progress = 100; sbS.progress = 25; sbD.progress = 35
+                        sbB.progress = 100; sbC.progress = 100; sbS.progress = 20; sbD.progress = 40
                         showEd()
                     }
                 }
@@ -221,7 +253,7 @@ class MainActivity : AppCompatActivity() {
         val b = edBmp ?: return
         camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE
         ivEd.setImageBitmap(b)
-        tvStatus.text = "LIQUID GLASS AI • ${b.width} x ${b.height} px"
+        tvStatus.text = "XIAOMI 14T LEICA AI • ${b.width} x ${b.height} px"
     }
 
     private fun updateEd() {
@@ -229,29 +261,27 @@ class MainActivity : AppCompatActivity() {
         val b = (sbB.progress - 100).toFloat(); val c = sbC.progress / 100f
         val s = sbS.progress / 100f; val d = sbD.progress / 100f
         exec.execute {
-            var r = color(src, b, c, 1.04f)
-            if (d > 0.08f) r = silkDenoise(r, d)
-            if (s > 0.08f) r = cleanUnsharpMask(r, s * 0.8f)
+            var r = color(src, b, c, 1.0f)
+            if (d > 0.05f) r = smoothBlurDenoise(r, d)
+            if (s > 0.05f) r = softHaloSharpen(r, s * 0.5f)
             edBmp = r
-            runOnUiThread { ivEd.setImageBitmap(r); tvStatus.text = "LIQUID GLASS AI • ${r.width} x ${r.height} px" }
+            runOnUiThread { ivEd.setImageBitmap(r); tvStatus.text = "XIAOMI 14T LEICA AI • ${r.width} x ${r.height} px" }
         }
     }
 
     private fun upscale2x() {
         val src = edBmp ?: return
         prog.visibility = View.VISIBLE
-        Toast.makeText(this, "Pure AI 2x Super-Res...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Xiaomi 14T AI Super-Res...", Toast.LENGTH_SHORT).show()
         exec.execute {
             val w = min(src.width * 2, 4096); val h = min(src.height * 2, 4096)
-            var b = silkDenoise(src, 0.85f)
-            b = silkDenoise(b, 0.65f)
+            var b = smoothBlurDenoise(src, 0.75f)
             b = Bitmap.createScaledBitmap(b, (src.width + w) / 2, (src.height + h) / 2, true)
             b = Bitmap.createScaledBitmap(b, w, h, true)
-            b = silkDenoise(b, 0.50f)
-            b = cleanUnsharpMask(b, 0.60f)
-            b = color(b, 2f, 1.04f, 1.05f)
+            b = smoothBlurDenoise(b, 0.45f)
+            b = softHaloSharpen(b, 0.38f)
             baseBmp = b; edBmp = b
-            runOnUiThread { prog.visibility = View.GONE; showEd(); Toast.makeText(this, "Clean 2x Super-Res Complete!", Toast.LENGTH_SHORT).show() }
+            runOnUiThread { prog.visibility = View.GONE; showEd(); Toast.makeText(this, "Leica 2x Super-Res Hotovo!", Toast.LENGTH_SHORT).show() }
         }
     }
 
@@ -270,66 +300,56 @@ class MainActivity : AppCompatActivity() {
         return out
     }
 
-    private fun silkDenoise(s: Bitmap, str: Float): Bitmap {
-        val w = s.width; val h = s.height; val p = IntArray(w * h); val out = p.clone()
-        s.getPixels(p, 0, w, 0, 0, w, h)
-        val thr = (28 + str * 65).toInt()
-        val bl = str.coerceIn(0.1f, 0.85f)
-        for (y in 1 until h - 1) {
-            val r = y * w
-            for (x in 1 until w - 1) {
-                val i = r + x; val c = p[i]
-                val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
-                var sr = cr * 2; var sg = cg * 2; var sb = cb * 2; var wt = 2
-                val nb = intArrayOf(p[i - 1], p[i + 1], p[i - w], p[i + w], p[i - w - 1], p[i - w + 1], p[i + w - 1], p[i + w + 1])
-                for (n in nb) {
-                    val nr = n shr 16 and 0xFF; val ng = n shr 8 and 0xFF; val nbl = n and 0xFF
-                    if (abs(cr - nr) + abs(cg - ng) + abs(cb - nbl) < thr) {
-                        sr += nr; sg += ng; sb += nbl; wt++
-                    }
-                }
-                if (wt > 2) {
-                    val fr = (cr * (1f - bl) + (sr / wt) * bl).roundToInt().coerceIn(0, 255)
-                    val fg = (cg * (1f - bl) + (sg / wt) * bl).roundToInt().coerceIn(0, 255)
-                    val fb = (cb * (1f - bl) + (sb / wt) * bl).roundToInt().coerceIn(0, 255)
-                    out[i] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
-                }
+    // Čisté vyhlazení šumu přes hardwarovou bikubickou interpolaci + zachování hran (nikdy nevytváří zrnění)
+    private fun smoothBlurDenoise(s: Bitmap, str: Float): Bitmap {
+        val w = s.width; val h = s.height
+        val factor = (1f - str * 0.45f).coerceIn(0.45f, 0.92f)
+        val small = Bitmap.createScaledBitmap(s, max(32, (w * factor).roundToInt()), max(32, (h * factor).roundToInt()), true)
+        val smooth = Bitmap.createScaledBitmap(small, w, h, true)
+        val pOrig = IntArray(w * h); val pSmooth = IntArray(w * h)
+        s.getPixels(pOrig, 0, w, 0, 0, w, h); smooth.getPixels(pSmooth, 0, w, 0, 0, w, h)
+        val thr = (32 + str * 60).toInt()
+        val bl = str.coerceIn(0.15f, 0.85f)
+        for (i in pOrig.indices) {
+            val c1 = pOrig[i]; val c2 = pSmooth[i]
+            val r1 = c1 shr 16 and 0xFF; val g1 = c1 shr 8 and 0xFF; val b1 = c1 and 0xFF
+            val r2 = c2 shr 16 and 0xFF; val g2 = c2 shr 8 and 0xFF; val b2 = c2 and 0xFF
+            val diff = abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2)
+            // Pokud je rozdíl malý (šum na ploše), vyhladíme ho; pokud je to ostrá hrana, necháme ji ostrou
+            if (diff < thr) {
+                val nr = (r1 * (1f - bl) + r2 * bl).roundToInt().coerceIn(0, 255)
+                val ng = (g1 * (1f - bl) + g2 * bl).roundToInt().coerceIn(0, 255)
+                val nb = (b1 * (1f - bl) + b2 * bl).roundToInt().coerceIn(0, 255)
+                pOrig[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
             }
         }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pOrig, 0, w, 0, 0, w, h) }
     }
 
-    private fun cleanUnsharpMask(s: Bitmap, amt: Float): Bitmap {
-        val w = s.width; val h = s.height; val p = IntArray(w * h); val out = p.clone()
-        s.getPixels(p, 0, w, 0, 0, w, h)
-        val str = amt.coerceIn(0.05f, 0.9f)
-        for (y in 1 until h - 1) {
-            val r = y * w
-            for (x in 1 until w - 1) {
-                val i = r + x; val c = p[i]
-                val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
-                val t = p[i - w]; val b = p[i + w]; val l = p[i - 1]; val rt = p[i + 1]
-                val tl = p[i - w - 1]; val tr = p[i - w + 1]; val bl = p[i + w - 1]; val br = p[i + w + 1]
-
-                val avgR = ((t shr 16 and 0xFF) + (b shr 16 and 0xFF) + (l shr 16 and 0xFF) + (rt shr 16 and 0xFF) +
-                        (tl shr 16 and 0xFF) + (tr shr 16 and 0xFF) + (bl shr 16 and 0xFF) + (br shr 16 and 0xFF)) shr 3
-                val avgG = ((t shr 8 and 0xFF) + (b shr 8 and 0xFF) + (l shr 8 and 0xFF) + (rt shr 8 and 0xFF) +
-                        (tl shr 8 and 0xFF) + (tr shr 8 and 0xFF) + (bl shr 8 and 0xFF) + (br shr 8 and 0xFF)) shr 3
-                val avgB = ((t and 0xFF) + (b and 0xFF) + (l and 0xFF) + (rt and 0xFF) +
-                        (tl and 0xFF) + (tr and 0xFF) + (bl and 0xFF) + (br and 0xFF)) shr 3
-
-                val dr = cr - avgR; val dg = cg - avgG; val db = cb - avgB
-                val diff = abs(dr) + abs(dg) + abs(db)
-                // Coring: ignore fine grain (< 18) and avoid extreme white halos (> 160)
-                if (diff < 18 || diff > 160) continue
-
-                val red = (cr + dr * str * 0.75f).roundToInt().coerceIn(0, 255)
-                val grn = (cg + dg * str * 0.75f).roundToInt().coerceIn(0, 255)
-                val blu = (cb + db * str * 0.75f).roundToInt().coerceIn(0, 255)
-                out[i] = (0xFF shl 24) or (red shl 16) or (grn shl 8) or blu
-            }
+    // Jemné optické doostření s omezením maximální změny o ±18 úrovní jasu (žádné bílé tečky ani zrno)
+    private fun softHaloSharpen(s: Bitmap, amt: Float): Bitmap {
+        val w = s.width; val h = s.height
+        val half = Bitmap.createScaledBitmap(s, max(32, w / 2), max(32, h / 2), true)
+        val blur = Bitmap.createScaledBitmap(half, w, h, true)
+        val pOrig = IntArray(w * h); val pBlur = IntArray(w * h)
+        s.getPixels(pOrig, 0, w, 0, 0, w, h); blur.getPixels(pBlur, 0, w, 0, 0, w, h)
+        val gain = amt.coerceIn(0.05f, 0.65f)
+        for (i in pOrig.indices) {
+            val c1 = pOrig[i]; val c2 = pBlur[i]
+            val r1 = c1 shr 16 and 0xFF; val g1 = c1 shr 8 and 0xFF; val b1 = c1 and 0xFF
+            val r2 = c2 shr 16 and 0xFF; val g2 = c2 shr 8 and 0xFF; val b2 = c2 and 0xFF
+            val dr = r1 - r2; val dg = g1 - g2; val db = b1 - b2
+            val lumDiff = (abs(dr) + abs(dg) + abs(db)) / 3
+            if (lumDiff < 8) continue // Ignorujeme jemný šum
+            val boostR = (dr * gain).roundToInt().coerceIn(-18, 18)
+            val boostG = (dg * gain).roundToInt().coerceIn(-18, 18)
+            val boostB = (db * gain).roundToInt().coerceIn(-18, 18)
+            val nr = (r1 + boostR).coerceIn(0, 255)
+            val ng = (g1 + boostG).coerceIn(0, 255)
+            val nb = (b1 + boostB).coerceIn(0, 255)
+            pOrig[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
         }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pOrig, 0, w, 0, 0, w, h) }
     }
 
     private fun saveImg() {
@@ -337,14 +357,14 @@ class MainActivity : AppCompatActivity() {
         prog.visibility = View.VISIBLE
         exec.execute {
             val cv = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "XiaomiAI_${System.currentTimeMillis()}.jpg")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "Xiaomi14T_Leica_${System.currentTimeMillis()}.jpg")
                 put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/XiaomiAICam")
             }
             contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let {
                 contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) }
             }
-            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Saved to Gallery!", Toast.LENGTH_LONG).show() }
+            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo do Galerie!", Toast.LENGTH_LONG).show() }
         }
     }
 }
