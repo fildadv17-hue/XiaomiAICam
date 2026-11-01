@@ -70,7 +70,7 @@ class MainActivity : AppCompatActivity() {
             background = glass(0x55FFFFFF, 0x22FFFFFF, 0x99FFFFFF, 60f)
         }
         tvZoom = TextView(this).apply { text = "1.0x LIQUID AI"; setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD }
-        swAi = Switch(this).apply { text = "Deep AI "; isChecked = true; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+        swAi = Switch(this).apply { text = "Pure AI "; isChecked = true; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
         top.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         top.addView(swAi)
         camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(28, 56, 28, 0) })
@@ -96,7 +96,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         bot.addView(Button(this).apply {
-            text = "CAPTURE • DEEP LIQUID AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            text = "CAPTURE • PURE LIQUID AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
             background = glass(0xEEFF7700, 0xBBFF2200, 0xCCFFFFFF, 60f)
             setOnClickListener { takePhoto() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 138))
@@ -118,16 +118,16 @@ class MainActivity : AppCompatActivity() {
             background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 56f)
         }
         card.addView(Button(this).apply {
-            text = "✨ Deep AI 2x Ultra-Upscale (6-Pass)"
+            text = "✨ Pure AI 2x Super-Res (Smooth + Crisp)"
             setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
             background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 44f)
             setOnClickListener { upscale2x() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 118).apply { bottomMargin = 12 })
 
         sbB = slider(card, "HDR Brightness", 200, 100)
-        sbC = slider(card, "Liquid Contrast", 200, 100)
-        sbS = slider(card, "AI Micro-Detail", 100, 35)
-        sbD = slider(card, "Deep AI Denoise", 100, 25)
+        sbC = slider(card, "Natural Contrast", 200, 100)
+        sbS = slider(card, "Clean Edge Sharpness", 100, 25)
+        sbD = slider(card, "Silk AI Denoise", 100, 35)
 
         val act = LinearLayout(this)
         act.addView(Button(this).apply {
@@ -188,7 +188,6 @@ class MainActivity : AppCompatActivity() {
     private fun takePhoto() {
         val cap = imgCap ?: return
         prog.visibility = View.VISIBLE
-        Toast.makeText(this, "Deep AI processing...", Toast.LENGTH_SHORT).show()
         cap.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
             override fun onCaptureSuccess(img: ImageProxy) {
                 val rot = img.imageInfo.rotationDegrees
@@ -201,17 +200,15 @@ class MainActivity : AppCompatActivity() {
                     if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
                     b = crop(b, swZoom)
                     if (ai) {
-                        val dn = if (z > 10f) 0.72f else if (z > 3f) 0.5f else 0.3f
-                        b = denoise(b, dn)
-                        b = denoise(b, dn * 0.7f)
-                        b = color(b, 7f, 1.15f, 1.14f)
-                        b = sharp(b, if (z > 12f) 0.85f else 0.65f)
-                        b = sharp(b, 0.45f)
+                        val passes = if (z > 8f) 2 else 1
+                        repeat(passes) { b = silkDenoise(b, 0.75f) }
+                        b = cleanUnsharpMask(b, if (z > 10f) 0.55f else 0.45f)
+                        b = color(b, 3f, 1.06f, 1.08f)
                     }
                     baseBmp = b; edBmp = b
                     runOnUiThread {
                         prog.visibility = View.GONE
-                        sbB.progress = 100; sbC.progress = 100; sbS.progress = 35; sbD.progress = 25
+                        sbB.progress = 100; sbC.progress = 100; sbS.progress = 25; sbD.progress = 35
                         showEd()
                     }
                 }
@@ -232,9 +229,9 @@ class MainActivity : AppCompatActivity() {
         val b = (sbB.progress - 100).toFloat(); val c = sbC.progress / 100f
         val s = sbS.progress / 100f; val d = sbD.progress / 100f
         exec.execute {
-            var r = color(src, b, c, 1.08f)
-            if (d > 0.05f) r = denoise(r, d)
-            if (s > 0.05f) r = sharp(r, s)
+            var r = color(src, b, c, 1.04f)
+            if (d > 0.08f) r = silkDenoise(r, d)
+            if (s > 0.08f) r = cleanUnsharpMask(r, s * 0.8f)
             edBmp = r
             runOnUiThread { ivEd.setImageBitmap(r); tvStatus.text = "LIQUID GLASS AI • ${r.width} x ${r.height} px" }
         }
@@ -243,19 +240,18 @@ class MainActivity : AppCompatActivity() {
     private fun upscale2x() {
         val src = edBmp ?: return
         prog.visibility = View.VISIBLE
-        Toast.makeText(this, "Running 6-Pass Deep AI Super-Res...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Pure AI 2x Super-Res...", Toast.LENGTH_SHORT).show()
         exec.execute {
             val w = min(src.width * 2, 4096); val h = min(src.height * 2, 4096)
-            var b = denoise(src, 0.6f)
-            b = denoise(b, 0.45f)
+            var b = silkDenoise(src, 0.85f)
+            b = silkDenoise(b, 0.65f)
             b = Bitmap.createScaledBitmap(b, (src.width + w) / 2, (src.height + h) / 2, true)
-            b = sharp(b, 0.55f)
             b = Bitmap.createScaledBitmap(b, w, h, true)
-            b = denoise(b, 0.35f)
-            b = sharp(b, 0.85f)
-            b = color(sharp(b, 0.4f), 4f, 1.08f, 1.12f)
+            b = silkDenoise(b, 0.50f)
+            b = cleanUnsharpMask(b, 0.60f)
+            b = color(b, 2f, 1.04f, 1.05f)
             baseBmp = b; edBmp = b
-            runOnUiThread { prog.visibility = View.GONE; showEd(); Toast.makeText(this, "6-Pass AI 2x Complete!", Toast.LENGTH_SHORT).show() }
+            runOnUiThread { prog.visibility = View.GONE; showEd(); Toast.makeText(this, "Clean 2x Super-Res Complete!", Toast.LENGTH_SHORT).show() }
         }
     }
 
@@ -274,24 +270,28 @@ class MainActivity : AppCompatActivity() {
         return out
     }
 
-    private fun denoise(s: Bitmap, str: Float): Bitmap {
+    private fun silkDenoise(s: Bitmap, str: Float): Bitmap {
         val w = s.width; val h = s.height; val p = IntArray(w * h); val out = p.clone()
         s.getPixels(p, 0, w, 0, 0, w, h)
-        val thr = (20 + str * 48).toInt(); val bl = str.coerceIn(0.05f, 0.88f)
+        val thr = (28 + str * 65).toInt()
+        val bl = str.coerceIn(0.1f, 0.85f)
         for (y in 1 until h - 1) {
             val r = y * w
             for (x in 1 until w - 1) {
-                val i = r + x; val c = p[i]; val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
-                var sr = cr; var sg = cg; var sb = cb; var cnt = 1
+                val i = r + x; val c = p[i]
+                val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
+                var sr = cr * 2; var sg = cg * 2; var sb = cb * 2; var wt = 2
                 val nb = intArrayOf(p[i - 1], p[i + 1], p[i - w], p[i + w], p[i - w - 1], p[i - w + 1], p[i + w - 1], p[i + w + 1])
                 for (n in nb) {
                     val nr = n shr 16 and 0xFF; val ng = n shr 8 and 0xFF; val nbl = n and 0xFF
-                    if (abs(cr - nr) + abs(cg - ng) + abs(cb - nbl) < thr) { sr += nr; sg += ng; sb += nbl; cnt++ }
+                    if (abs(cr - nr) + abs(cg - ng) + abs(cb - nbl) < thr) {
+                        sr += nr; sg += ng; sb += nbl; wt++
+                    }
                 }
-                if (cnt > 1) {
-                    val fr = (cr * (1f - bl) + (sr / cnt) * bl).roundToInt().coerceIn(0, 255)
-                    val fg = (cg * (1f - bl) + (sg / cnt) * bl).roundToInt().coerceIn(0, 255)
-                    val fb = (cb * (1f - bl) + (sb / cnt) * bl).roundToInt().coerceIn(0, 255)
+                if (wt > 2) {
+                    val fr = (cr * (1f - bl) + (sr / wt) * bl).roundToInt().coerceIn(0, 255)
+                    val fg = (cg * (1f - bl) + (sg / wt) * bl).roundToInt().coerceIn(0, 255)
+                    val fb = (cb * (1f - bl) + (sb / wt) * bl).roundToInt().coerceIn(0, 255)
                     out[i] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
                 }
             }
@@ -299,19 +299,33 @@ class MainActivity : AppCompatActivity() {
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
     }
 
-    private fun sharp(s: Bitmap, amt: Float): Bitmap {
+    private fun cleanUnsharpMask(s: Bitmap, amt: Float): Bitmap {
         val w = s.width; val h = s.height; val p = IntArray(w * h); val out = p.clone()
         s.getPixels(p, 0, w, 0, 0, w, h)
-        val cw = 1f + 4f * amt; val nw = -amt
+        val str = amt.coerceIn(0.05f, 0.9f)
         for (y in 1 until h - 1) {
             val r = y * w
             for (x in 1 until w - 1) {
-                val i = r + x; val c = p[i]; val t = p[i - w]; val b = p[i + w]; val l = p[i - 1]; val rt = p[i + 1]
-                val cr = c shr 16 and 0xFF; val tr = t shr 16 and 0xFF
-                if (abs(cr - tr) < 3) continue
-                val red = ((cr * cw) + (tr + (b shr 16 and 0xFF) + (l shr 16 and 0xFF) + (rt shr 16 and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
-                val grn = (((c shr 8 and 0xFF) * cw) + ((t shr 8 and 0xFF) + (b shr 8 and 0xFF) + (l shr 8 and 0xFF) + (rt shr 8 and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
-                val blu = (((c and 0xFF) * cw) + ((t and 0xFF) + (b and 0xFF) + (l and 0xFF) + (rt and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
+                val i = r + x; val c = p[i]
+                val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
+                val t = p[i - w]; val b = p[i + w]; val l = p[i - 1]; val rt = p[i + 1]
+                val tl = p[i - w - 1]; val tr = p[i - w + 1]; val bl = p[i + w - 1]; val br = p[i + w + 1]
+
+                val avgR = ((t shr 16 and 0xFF) + (b shr 16 and 0xFF) + (l shr 16 and 0xFF) + (rt shr 16 and 0xFF) +
+                        (tl shr 16 and 0xFF) + (tr shr 16 and 0xFF) + (bl shr 16 and 0xFF) + (br shr 16 and 0xFF)) shr 3
+                val avgG = ((t shr 8 and 0xFF) + (b shr 8 and 0xFF) + (l shr 8 and 0xFF) + (rt shr 8 and 0xFF) +
+                        (tl shr 8 and 0xFF) + (tr shr 8 and 0xFF) + (bl shr 8 and 0xFF) + (br shr 8 and 0xFF)) shr 3
+                val avgB = ((t and 0xFF) + (b and 0xFF) + (l and 0xFF) + (rt and 0xFF) +
+                        (tl and 0xFF) + (tr and 0xFF) + (bl and 0xFF) + (br and 0xFF)) shr 3
+
+                val dr = cr - avgR; val dg = cg - avgG; val db = cb - avgB
+                val diff = abs(dr) + abs(dg) + abs(db)
+                // Coring: ignore fine grain (< 18) and avoid extreme white halos (> 160)
+                if (diff < 18 || diff > 160) continue
+
+                val red = (cr + dr * str * 0.75f).roundToInt().coerceIn(0, 255)
+                val grn = (cg + dg * str * 0.75f).roundToInt().coerceIn(0, 255)
+                val blu = (cb + db * str * 0.75f).roundToInt().coerceIn(0, 255)
                 out[i] = (0xFF shl 24) or (red shl 16) or (grn shl 8) or blu
             }
         }
