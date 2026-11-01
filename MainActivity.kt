@@ -21,7 +21,6 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
-import java.util.concurrent.Future
 import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {
@@ -31,8 +30,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sbDepix: SeekBar; private lateinit var sbDetail: SeekBar; private lateinit var sbClarity: SeekBar
     private var imgCap: ImageCapture? = null; private var cam: androidx.camera.core.Camera? = null
     private val exec = Executors.newSingleThreadExecutor()
-    private val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(4)
-    private val pool = Executors.newFixedThreadPool(cores)
     private var curZoom = 1f; private var maxHw = 20f; private var swZoom = 1f; private var curScale = 2
     private var rawBmp: Bitmap? = null; private var aiBmp: Bitmap? = null
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCam() }
@@ -41,6 +38,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(s); buildUi()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCam()
         else perm.launch(Manifest.permission.CAMERA)
+    }
+
+    private fun saveImg() {
+        val b = aiBmp ?: return; prog.visibility = View.VISIBLE
+        exec.execute {
+            val cv = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, "14T_RealAI_${System.currentTimeMillis()}.jpg"); put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg") }
+            contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) } }
+            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo!", Toast.LENGTH_LONG).show() }
+        }
     }
 
     private fun glass(c1: Long, c2: Long, st: Long, r: Float) =
@@ -84,7 +90,7 @@ class MainActivity : AppCompatActivity() {
         edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 10 })
 
         val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 20, 28, 20); background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 52f) }
-        card.addView(TextView(this).apply { text = "↔ VLEVO Bez AI | VPRAVO Lanczos-3 + PDE AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
+        card.addView(TextView(this).apply { text = "↔ VLEVO Surový výřez | VPRAVO Lanczos-3 + PDE AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
         sbSplit = SeekBar(this).apply {
             max = 100; progress = 50
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -106,7 +112,7 @@ class MainActivity : AppCompatActivity() {
         card.addView(upRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 6 })
 
         sbDepix = slider(card, "1. Anisotropic De-Pixelate (Odstranění čtverečků)", 100, 80)
-        sbDetail = slider(card, "2. Deconvolution Edge Detail (Ostré hrany)", 100, 75)
+        sbDetail = slider(card, "2. Deconvolution Edge Detail (Ostrost hran)", 100, 75)
         sbClarity = slider(card, "3. Local Texture Structure (Kresba bez změny jasu)", 100, 60)
 
         val act = LinearLayout(this)
@@ -158,7 +164,7 @@ class MainActivity : AppCompatActivity() {
                     val cw = max(140, (b.width / swZoom).roundToInt()); val ch = max(140, (b.height / swZoom).roundToInt())
                     val crop = Bitmap.createBitmap(b, (b.width - cw) / 2, (b.height - ch) / 2, cw, ch)
                     rawBmp = crop; curScale = 2
-                    aiBmp = processRealAi(crop, 2, 0.80f, 0.75f, 0.60f)
+                    aiBmp = RealAiEngine.processRealAi(crop, 2, 0.80f, 0.75f, 0.60f)
                     runOnUiThread { prog.visibility = View.GONE; sbSplit.progress = 50; sbDepix.progress = 80; sbDetail.progress = 75; sbClarity.progress = 60; camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit() }
                 }
             }
@@ -169,7 +175,7 @@ class MainActivity : AppCompatActivity() {
     private fun recalcAi() {
         val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
         val dp = sbDepix.progress / 100f; val dt = sbDetail.progress / 100f; val cl = sbClarity.progress / 100f
-        exec.execute { aiBmp = processRealAi(orig, curScale, dp, dt, cl); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
+        exec.execute { aiBmp = RealAiEngine.processRealAi(orig, curScale, dp, dt, cl); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
     }
 
     private fun renderSplit() {
@@ -181,103 +187,4 @@ class MainActivity : AppCompatActivity() {
         if (sx in 2..(w - 2)) cv.drawLine(sx.toFloat(), 0f, sx.toFloat(), h.toFloat(), Paint().apply { color = Color.CYAN; strokeWidth = 5f })
         ivEd.setImageBitmap(comp); tvStatus.text = "LANCZOS-3 + PDE AI • ${w}x${h} px (Raw: ${orig.width}x${orig.height})"
     }
-
-    private fun processRealAi(src: Bitmap, scale: Int, depix: Float, detail: Float, clarity: Float): Bitmap {
-        var w = pdeDiffusion(src, (2 + depix * 4).roundToInt(), 18f + depix * 35f)
-        val sc = min(scale.toFloat(), 3000f / max(w.width, w.height)).coerceAtLeast(1.1f)
-        w = lanczos3(w, (w.width * sc).roundToInt(), (w.height * sc).roundToInt())
-        if (depix > 0.1f) w = pdeDiffusion(w, 2, 14f + depix * 20f)
-        return synthTexture(w, detail, clarity)
-    }
-
-    private fun pdeDiffusion(src: Bitmap, steps: Int, kappa: Float): Bitmap {
-        val w = src.width; val h = src.height; var p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); var nx = p.clone()
-        val ik2 = 1f / (kappa * kappa); val ch = max(1, (h - 2) / cores)
-        repeat(steps) {
-            (0 until cores).map { t ->
-                val y0 = (1 + t * ch).coerceAtMost(h - 1); val y1 = if (t == cores - 1) h - 1 else (y0 + ch).coerceAtMost(h - 1)
-                pool.submit {
-                    for (y in y0 until y1) {
-                        val r = y * w
-                        for (x in 1 until w - 1) {
-                            val i = r + x; val c = p[i]; val rC = c shr 16 and 0xFF; val gC = c shr 8 and 0xFF; val bC = c and 0xFF
-                            var dR = 0f; var dG = 0f; var dB = 0f
-                            val nb = intArrayOf(p[i - w], p[i + w], p[i - 1], p[i + 1], p[i - w - 1], p[i - w + 1], p[i + w - 1], p[i + w + 1])
-                            for (k in nb.indices) {
-                                val n = nb[k]; val nr = (n shr 16 and 0xFF) - rC; val ng = (n shr 8 and 0xFF) - gC; val nbl = (n and 0xFF) - bC
-                                val wt = (1f / (1f + ((nr * nr + ng * ng + nbl * nbl) / 3f) * ik2)) * (if (k < 4) 0.16f else 0.08f)
-                                dR += nr * wt; dG += ng * wt; dB += nbl * wt
-                            }
-                            nx[i] = (0xFF shl 24) or ((rC + dR).roundToInt().coerceIn(0, 255) shl 16) or ((gC + dG).roundToInt().coerceIn(0, 255) shl 8) or (bC + dB).roundToInt().coerceIn(0, 255)
-                        }
-                    }
-                }
-            }.forEach { it.get() }
-            val tmp = p; p = nx; nx = tmp
-        }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(p, 0, w, 0, 0, w, h) }
-    }
-
-    private fun lk(x: Float): Float {
-        val ax = abs(x); if (ax < 1e-5f) return 1f; if (ax >= 3f) return 0f
-        val px = Math.PI.toFloat() * ax; return (sin(px) / px) * (sin(px / 3f) / (px / 3f))
-    }
-
-    private fun lanczos3(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
-        val sw = src.width; val sh = src.height; val sp = IntArray(sw * sh); src.getPixels(sp, 0, sw, 0, 0, sw, sh)
-        val tmp = IntArray(dstW * sh); val dp = IntArray(dstW * dstH); val xR = sw.toFloat() / dstW; val yR = sh.toFloat() / dstH
-        val hCh = max(1, sh / cores); val vCh = max(1, dstH / cores)
-        (0 until cores).map { t ->
-            val y0 = (t * hCh).coerceAtMost(sh); val y1 = if (t == cores - 1) sh else (y0 + hCh).coerceAtMost(sh)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val rI = y * sw; val rO = y * dstW
-                    for (x in 0 until dstW) {
-                        val cx = (x + 0.5f) * xR - 0.5f; val ix = floor(cx).toInt()
-                        var rS = 0f; var gS = 0f; var bS = 0f; var wS = 0f
-                        for (k in -2..3) {
-                            val w = lk(cx - (ix + k)); val c = sp[rI + (ix + k).coerceIn(0, sw - 1)]
-                            rS += (c shr 16 and 0xFF) * w; gS += (c shr 8 and 0xFF) * w; bS += (c and 0xFF) * w; wS += w
-                        }
-                        val iw = if (abs(wS) > 1e-4f) 1f / wS else 1f
-                        tmp[rO + x] = (0xFF shl 24) or ((rS * iw).roundToInt().coerceIn(0, 255) shl 16) or ((gS * iw).roundToInt().coerceIn(0, 255) shl 8) or (bS * iw).roundToInt().coerceIn(0, 255)
-                    }
-                }
-            }
-        }.forEach { it.get() }
-        (0 until cores).map { t ->
-            val y0 = (t * vCh).coerceAtMost(dstH); val y1 = if (t == cores - 1) dstH else (y0 + vCh).coerceAtMost(dstH)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val cy = (y + 0.5f) * yR - 0.5f; val iy = floor(cy).toInt(); val rO = y * dstW
-                    for (x in 0 until dstW) {
-                        var rS = 0f; var gS = 0f; var bS = 0f; var wS = 0f
-                        for (k in -2..3) {
-                            val w = lk(cy - (iy + k)); val c = tmp[(iy + k).coerceIn(0, sh - 1) * dstW + x]
-                            rS += (c shr 16 and 0xFF) * w; gS += (c shr 8 and 0xFF) * w; bS += (c and 0xFF) * w; wS += w
-                        }
-                        val iw = if (abs(wS) > 1e-4f) 1f / wS else 1f
-                        dp[rO + x] = (0xFF shl 24) or ((rS * iw).roundToInt().coerceIn(0, 255) shl 16) or ((gS * iw).roundToInt().coerceIn(0, 255) shl 8) or (bS * iw).roundToInt().coerceIn(0, 255)
-                    }
-                }
-            }
-        }.forEach { it.get() }
-        return Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888).apply { setPixels(dp, 0, dstW, 0, 0, dstW, dstH) }
-    }
-
-    private fun synthTexture(src: Bitmap, detail: Float, clarity: Float): Bitmap {
-        val w = src.width; val h = src.height; val p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); val out = p.clone()
-        val med = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(src, max(32, w / 4), max(32, h / 4), true), w, h, true)
-        val pM = IntArray(w * h); med.getPixels(pM, 0, w, 0, 0, w, h)
-        val lum = IntArray(w * h) { ((p[it] shr 16 and 0xFF) * 77 + (p[it] shr 8 and 0xFF) * 150 + (p[it] and 0xFF) * 29) shr 8 }
-        val gF = detail * 1.85f; val gC = clarity * 0.65f; val ch = max(1, (h - 2) / cores)
-        (0 until cores).map { t ->
-            val y0 = (1 + t * ch).coerceAtMost(h - 1); val y1 = if (t == cores - 1) h - 1 else (y0 + ch).coerceAtMost(h - 1)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val r = y * w
-                    for (x in 1 until w - 1) {
-                        val i = r + x; val c = p[i]; val cm = pM[i]; val lC = lum[i]
-                        val blur = (lC * 4 + (lum[i - w] + lum[i + w] + lum[i - 1] + lum[i + 1]) * 2 + lum[i - w - 1] + lum[i - w + 1] + lum[i + w - 1] + lum[i + w + 1]) shr 4
-                        val hf = lC - blur; val lM = ((cm shr 16 and 0xFF) * 77 + (cm shr 8 and 0xFF) * 150 + (cm and 0xFF) * 29) shr 8
-                        val d = ((if (abs(hf) > 1) (hf * gF).coerceIn(-22f, 22f) else 0f)
+}
