@@ -21,16 +21,19 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {
     private lateinit var pv: PreviewView; private lateinit var camLay: FrameLayout; private lateinit var edLay: LinearLayout
     private lateinit var ivEd: ImageView; private lateinit var tvZoom: TextView; private lateinit var tvStatus: TextView
     private lateinit var prog: ProgressBar; private lateinit var sbSplit: SeekBar
-    private lateinit var sbDepix: SeekBar; private lateinit var sbQual: SeekBar; private lateinit var sbBri: SeekBar
+    private lateinit var sbDepix: SeekBar; private lateinit var sbDetail: SeekBar; private lateinit var sbClarity: SeekBar
     private var imgCap: ImageCapture? = null; private var cam: androidx.camera.core.Camera? = null
     private val exec = Executors.newSingleThreadExecutor()
-    private var curZoom = 1f; private var maxHw = 20f; private var swZoom = 1f
+    private val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(4)
+    private val pool = Executors.newFixedThreadPool(cores)
+    private var curZoom = 1f; private var maxHw = 20f; private var swZoom = 1f; private var curScale = 2
     private var rawBmp: Bitmap? = null; private var aiBmp: Bitmap? = null
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCam() }
 
@@ -49,7 +52,7 @@ class MainActivity : AppCompatActivity() {
         camLay.addView(FrameLayout(this).apply { clipChildren = true; addView(pv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
         val top = LinearLayout(this).apply { setPadding(36, 24, 36, 24); gravity = Gravity.CENTER_VERTICAL; background = glass(0x55FFFFFF, 0x22FFFFFF, 0x99FFFFFF, 60f) }
-        tvZoom = TextView(this).apply { text = "14T AI • 1.0x"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD }
+        tvZoom = TextView(this).apply { text = "XIAOMI 14T • 1.0x LANCZOS AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD }
         top.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(24, 52, 24, 0) })
 
@@ -69,7 +72,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         bot.addView(Button(this).apply {
-            text = "CAPTURE • TRUE QUALITY AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            text = "CAPTURE • 8-CORE LANCZOS-3 AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
             background = glass(0xEEFF6900, 0xBBCC2200, 0xCCFFFFFF, 60f); setOnClickListener { takePhoto() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 136))
         camLay.addView(bot, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 36) })
@@ -81,7 +84,7 @@ class MainActivity : AppCompatActivity() {
         edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 10 })
 
         val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 20, 28, 20); background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 52f) }
-        card.addView(TextView(this).apply { text = "↔ VLEVO Bez AI | VPRAVO AI Upscaled"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
+        card.addView(TextView(this).apply { text = "↔ VLEVO Bez AI | VPRAVO Lanczos-3 + PDE AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
         sbSplit = SeekBar(this).apply {
             max = 100; progress = 50
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -93,18 +96,18 @@ class MainActivity : AppCompatActivity() {
 
         val upRow = LinearLayout(this)
         upRow.addView(Button(this).apply {
-            text = "✨ 2x AI Upscaler"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
-            background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 36f); setOnClickListener { runUpscaler(2) }
+            text = "✨ 2x Lanczos Upscale"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 36f); setOnClickListener { curScale = 2; recalcAi() }
         }, LinearLayout.LayoutParams(0, 105, 1f).apply { rightMargin = 6 })
         upRow.addView(Button(this).apply {
-            text = "🚀 4x Ultra Upscaler"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
-            background = glass(0xDDAA00FF, 0xBB5500CC, 0xBBFFFFFF, 36f); setOnClickListener { runUpscaler(4) }
+            text = "🚀 4x Ultra Super-Res"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xDDAA00FF, 0xBB5500CC, 0xBBFFFFFF, 36f); setOnClickListener { curScale = 4; recalcAi() }
         }, LinearLayout.LayoutParams(0, 105, 1f).apply { leftMargin = 6 })
         card.addView(upRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 6 })
 
-        sbDepix = slider(card, "1. De-Pixelate (Odstranění čtverečků)", 100, 80)
-        sbQual = slider(card, "2. AI Edge & Texture Quality (Kresba)", 100, 65)
-        sbBri = slider(card, "3. Pure Brightness (Pouze jas)", 200, 100)
+        sbDepix = slider(card, "1. Anisotropic De-Pixelate (Odstranění čtverečků)", 100, 80)
+        sbDetail = slider(card, "2. Deconvolution Edge Detail (Ostré hrany)", 100, 75)
+        sbClarity = slider(card, "3. Local Texture Structure (Kresba bez změny jasu)", 100, 60)
 
         val act = LinearLayout(this)
         act.addView(Button(this).apply { text = "Retake"; setTextColor(Color.WHITE); background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f); setOnClickListener { edLay.visibility = View.GONE; camLay.visibility = View.VISIBLE } }, LinearLayout.LayoutParams(0, 108, 1f).apply { rightMargin = 8 })
@@ -141,7 +144,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setZoom(z: Float) {
         curZoom = z.coerceIn(1f, 100f); val hw = min(curZoom, maxHw); cam?.cameraControl?.setZoomRatio(hw); swZoom = (curZoom / hw).coerceAtLeast(1f)
-        pv.scaleX = swZoom; pv.scaleY = swZoom; tvZoom.text = String.format("14T • %.1fx", curZoom)
+        pv.scaleX = swZoom; pv.scaleY = swZoom; tvZoom.text = String.format("XIAOMI 14T • %.1fx LANCZOS AI", curZoom)
     }
 
     private fun takePhoto() {
@@ -152,11 +155,11 @@ class MainActivity : AppCompatActivity() {
                 exec.execute {
                     var b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
-                    val cw = max(120, (b.width / swZoom).roundToInt()); val ch = max(120, (b.height / swZoom).roundToInt())
+                    val cw = max(140, (b.width / swZoom).roundToInt()); val ch = max(140, (b.height / swZoom).roundToInt())
                     val crop = Bitmap.createBitmap(b, (b.width - cw) / 2, (b.height - ch) / 2, cw, ch)
-                    rawBmp = crop
-                    aiBmp = processQualityAi(crop, 2, 0.80f, 0.65f, 0f)
-                    runOnUiThread { prog.visibility = View.GONE; sbSplit.progress = 50; sbDepix.progress = 80; sbQual.progress = 65; sbBri.progress = 100; camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit() }
+                    rawBmp = crop; curScale = 2
+                    aiBmp = processRealAi(crop, 2, 0.80f, 0.75f, 0.60f)
+                    runOnUiThread { prog.visibility = View.GONE; sbSplit.progress = 50; sbDepix.progress = 80; sbDetail.progress = 75; sbClarity.progress = 60; camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit() }
                 }
             }
             override fun onError(e: ImageCaptureException) { prog.visibility = View.GONE }
@@ -165,18 +168,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun recalcAi() {
         val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
-        val dp = sbDepix.progress / 100f; val q = sbQual.progress / 100f; val br = (sbBri.progress - 100).toFloat()
-        exec.execute { aiBmp = processQualityAi(orig, 2, dp, q, br); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
-    }
-
-    private fun runUpscaler(factor: Int) {
-        val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
-        val dp = sbDepix.progress / 100f; val q = sbQual.progress / 100f; val br = (sbBri.progress - 100).toFloat()
-        Toast.makeText(this, "AI ${factor}x Super-Resolution...", Toast.LENGTH_SHORT).show()
-        exec.execute {
-            aiBmp = processQualityAi(orig, factor, (dp + 0.1f).coerceAtMost(1f), (q + 0.15f).coerceAtMost(1f), br)
-            runOnUiThread { prog.visibility = View.GONE; renderSplit() }
-        }
+        val dp = sbDepix.progress / 100f; val dt = sbDetail.progress / 100f; val cl = sbClarity.progress / 100f
+        exec.execute { aiBmp = processRealAi(orig, curScale, dp, dt, cl); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
     }
 
     private fun renderSplit() {
@@ -186,85 +179,105 @@ class MainActivity : AppCompatActivity() {
         cv.drawBitmap(ai, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
         if (sx > 0) { cv.save(); cv.clipRect(0, 0, sx, h); cv.drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, w, h), null); cv.restore() }
         if (sx in 2..(w - 2)) cv.drawLine(sx.toFloat(), 0f, sx.toFloat(), h.toFloat(), Paint().apply { color = Color.CYAN; strokeWidth = 5f })
-        ivEd.setImageBitmap(comp); tvStatus.text = "AI SUPER-RES • ${w}x${h} px (Originál: ${orig.width}x${orig.height})"
+        ivEd.setImageBitmap(comp); tvStatus.text = "LANCZOS-3 + PDE AI • ${w}x${h} px (Raw: ${orig.width}x${orig.height})"
     }
 
-    // Skutečný De-Pixelate + Multi-Step Super-Resolution Upscaler (nemění jas, čistí kostičky a rekonstruuje hrany)
-    private fun processQualityAi(src: Bitmap, upFactor: Int, depix: Float, qual: Float, bri: Float): Bitmap {
-        // 1. Pre-Upscale Bilateral De-Blocking (vyhladí čtverečky přímo na malém výřezu před zvětšením)
-        var cur = bilateralClean(src, depix)
-        val maxEdge = max(src.width, src.height)
-        val targetScale = min(upFactor.toFloat(), 3200f / maxEdge).coerceAtLeast(1.2f)
-        val dstW = (src.width * targetScale).roundToInt(); val dstH = (src.height * targetScale).roundToInt()
-
-        // 2. Postupné sub-pixelové převzorkování po krocích 1.35x s mezikrokovým čištěním hran
-        while (cur.width * 1.35f < dstW) {
-            val nw = (cur.width * 1.35f).roundToInt(); val nh = (cur.height * 1.35f).roundToInt()
-            cur = Bitmap.createScaledBitmap(cur, nw, nh, true)
-            cur = edgeGuidedReconstruct(cur, depix * 0.6f, qual * 0.5f)
-        }
-        cur = Bitmap.createScaledBitmap(cur, dstW, dstH, true)
-
-        // 3. Finální rekonstrukce ostrosti a vyhlazení schodů na vysokém rozlišení
-        cur = edgeGuidedReconstruct(cur, depix, qual)
-
-        if (abs(bri) < 1f) return cur
-        val out = Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888)
-        val cm = ColorMatrix(floatArrayOf(1f, 0f, 0f, 0f, bri, 0f, 1f, 0f, 0f, bri, 0f, 0f, 1f, 0f, bri, 0f, 0f, 0f, 1f, 0f))
-        Canvas(out).drawBitmap(cur, 0f, 0f, Paint().apply { colorFilter = ColorMatrixColorFilter(cm) }); return out
+    private fun processRealAi(src: Bitmap, scale: Int, depix: Float, detail: Float, clarity: Float): Bitmap {
+        var w = pdeDiffusion(src, (2 + depix * 4).roundToInt(), 18f + depix * 35f)
+        val sc = min(scale.toFloat(), 3000f / max(w.width, w.height)).coerceAtLeast(1.1f)
+        w = lanczos3(w, (w.width * sc).roundToInt(), (w.height * sc).roundToInt())
+        if (depix > 0.1f) w = pdeDiffusion(w, 2, 14f + depix * 20f)
+        return synthTexture(w, detail, clarity)
     }
 
-    private fun bilateralClean(s: Bitmap, str: Float): Bitmap {
-        if (str < 0.05f) return s
-        val w = s.width; val h = s.height; val p = IntArray(w * h); s.getPixels(p, 0, w, 0, 0, w, h); val out = p.clone()
-        val thr = (25 + str * 75).toInt(); val bl = (str * 0.85f).coerceIn(0.1f, 0.9f)
-        for (y in 1 until h - 1) {
-            val r = y * w
-            for (x in 1 until w - 1) {
-                val i = r + x; val c = p[i]; val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
-                var sr = cr * 2; var sg = cg * 2; var sb = cb * 2; var wt = 2
-                val nb = intArrayOf(p[i - 1], p[i + 1], p[i - w], p[i + w], p[i - w - 1], p[i - w + 1], p[i + w - 1], p[i + w + 1])
-                for (n in nb) {
-                    val nr = n shr 16 and 0xFF; val ng = n shr 8 and 0xFF; val nbl = n and 0xFF
-                    if (abs(cr - nr) + abs(cg - ng) + abs(cb - nbl) < thr) { sr += nr; sg += ng; sb += nbl; wt++ }
+    private fun pdeDiffusion(src: Bitmap, steps: Int, kappa: Float): Bitmap {
+        val w = src.width; val h = src.height; var p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); var nx = p.clone()
+        val ik2 = 1f / (kappa * kappa); val ch = max(1, (h - 2) / cores)
+        repeat(steps) {
+            (0 until cores).map { t ->
+                val y0 = (1 + t * ch).coerceAtMost(h - 1); val y1 = if (t == cores - 1) h - 1 else (y0 + ch).coerceAtMost(h - 1)
+                pool.submit {
+                    for (y in y0 until y1) {
+                        val r = y * w
+                        for (x in 1 until w - 1) {
+                            val i = r + x; val c = p[i]; val rC = c shr 16 and 0xFF; val gC = c shr 8 and 0xFF; val bC = c and 0xFF
+                            var dR = 0f; var dG = 0f; var dB = 0f
+                            val nb = intArrayOf(p[i - w], p[i + w], p[i - 1], p[i + 1], p[i - w - 1], p[i - w + 1], p[i + w - 1], p[i + w + 1])
+                            for (k in nb.indices) {
+                                val n = nb[k]; val nr = (n shr 16 and 0xFF) - rC; val ng = (n shr 8 and 0xFF) - gC; val nbl = (n and 0xFF) - bC
+                                val wt = (1f / (1f + ((nr * nr + ng * ng + nbl * nbl) / 3f) * ik2)) * (if (k < 4) 0.16f else 0.08f)
+                                dR += nr * wt; dG += ng * wt; dB += nbl * wt
+                            }
+                            nx[i] = (0xFF shl 24) or ((rC + dR).roundToInt().coerceIn(0, 255) shl 16) or ((gC + dG).roundToInt().coerceIn(0, 255) shl 8) or (bC + dB).roundToInt().coerceIn(0, 255)
+                        }
+                    }
                 }
-                val fr = (cr * (1f - bl) + (sr / wt) * bl).roundToInt().coerceIn(0, 255)
-                val fg = (cg * (1f - bl) + (sg / wt) * bl).roundToInt().coerceIn(0, 255)
-                val fb = (cb * (1f - bl) + (sb / wt) * bl).roundToInt().coerceIn(0, 255)
-                out[i] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
+            }.forEach { it.get() }
+            val tmp = p; p = nx; nx = tmp
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(p, 0, w, 0, 0, w, h) }
+    }
+
+    private fun lk(x: Float): Float {
+        val ax = abs(x); if (ax < 1e-5f) return 1f; if (ax >= 3f) return 0f
+        val px = Math.PI.toFloat() * ax; return (sin(px) / px) * (sin(px / 3f) / (px / 3f))
+    }
+
+    private fun lanczos3(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
+        val sw = src.width; val sh = src.height; val sp = IntArray(sw * sh); src.getPixels(sp, 0, sw, 0, 0, sw, sh)
+        val tmp = IntArray(dstW * sh); val dp = IntArray(dstW * dstH); val xR = sw.toFloat() / dstW; val yR = sh.toFloat() / dstH
+        val hCh = max(1, sh / cores); val vCh = max(1, dstH / cores)
+        (0 until cores).map { t ->
+            val y0 = (t * hCh).coerceAtMost(sh); val y1 = if (t == cores - 1) sh else (y0 + hCh).coerceAtMost(sh)
+            pool.submit {
+                for (y in y0 until y1) {
+                    val rI = y * sw; val rO = y * dstW
+                    for (x in 0 until dstW) {
+                        val cx = (x + 0.5f) * xR - 0.5f; val ix = floor(cx).toInt()
+                        var rS = 0f; var gS = 0f; var bS = 0f; var wS = 0f
+                        for (k in -2..3) {
+                            val w = lk(cx - (ix + k)); val c = sp[rI + (ix + k).coerceIn(0, sw - 1)]
+                            rS += (c shr 16 and 0xFF) * w; gS += (c shr 8 and 0xFF) * w; bS += (c and 0xFF) * w; wS += w
+                        }
+                        val iw = if (abs(wS) > 1e-4f) 1f / wS else 1f
+                        tmp[rO + x] = (0xFF shl 24) or ((rS * iw).roundToInt().coerceIn(0, 255) shl 16) or ((gS * iw).roundToInt().coerceIn(0, 255) shl 8) or (bS * iw).roundToInt().coerceIn(0, 255)
+                    }
+                }
             }
-        }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+        }.forEach { it.get() }
+        (0 until cores).map { t ->
+            val y0 = (t * vCh).coerceAtMost(dstH); val y1 = if (t == cores - 1) dstH else (y0 + vCh).coerceAtMost(dstH)
+            pool.submit {
+                for (y in y0 until y1) {
+                    val cy = (y + 0.5f) * yR - 0.5f; val iy = floor(cy).toInt(); val rO = y * dstW
+                    for (x in 0 until dstW) {
+                        var rS = 0f; var gS = 0f; var bS = 0f; var wS = 0f
+                        for (k in -2..3) {
+                            val w = lk(cy - (iy + k)); val c = tmp[(iy + k).coerceIn(0, sh - 1) * dstW + x]
+                            rS += (c shr 16 and 0xFF) * w; gS += (c shr 8 and 0xFF) * w; bS += (c and 0xFF) * w; wS += w
+                        }
+                        val iw = if (abs(wS) > 1e-4f) 1f / wS else 1f
+                        dp[rO + x] = (0xFF shl 24) or ((rS * iw).roundToInt().coerceIn(0, 255) shl 16) or ((gS * iw).roundToInt().coerceIn(0, 255) shl 8) or (bS * iw).roundToInt().coerceIn(0, 255)
+                    }
+                }
+            }
+        }.forEach { it.get() }
+        return Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888).apply { setPixels(dp, 0, dstW, 0, 0, dstW, dstH) }
     }
 
-    private fun edgeGuidedReconstruct(s: Bitmap, depix: Float, qual: Float): Bitmap {
-        val w = s.width; val h = s.height
-        val rad = (1f - depix * 0.38f).coerceIn(0.55f, 0.92f)
-        val smooth = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(s, max(32, (w * rad).roundToInt()), max(32, (h * rad).roundToInt()), true), w, h, true)
-        val wide = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(smooth, max(24, w / 3), max(24, h / 3), true), w, h, true)
-        val pO = IntArray(w * h); val pS = IntArray(w * h); val pW = IntArray(w * h)
-        s.getPixels(pO, 0, w, 0, 0, w, h); smooth.getPixels(pS, 0, w, 0, 0, w, h); wide.getPixels(pW, 0, w, 0, 0, w, h)
-        val mix = (depix * 0.85f).coerceIn(0.1f, 0.92f); val gain = qual * 1.9f
-        for (i in pO.indices) {
-            val cO = pO[i]; val cS = pS[i]; val cW = pW[i]
-            val rS = cS shr 16 and 0xFF; val gS = cS shr 8 and 0xFF; val bS = cS and 0xFF
-            val bR = (cO shr 16 and 0xFF) * (1f - mix) + rS * mix
-            val bG = (cO shr 8 and 0xFF) * (1f - mix) + gS * mix
-            val bB = (cO and 0xFF) * (1f - mix) + bS * mix
-            val nr = (bR + ((rS - (cW shr 16 and 0xFF)) * gain).coerceIn(-26f, 26f)).roundToInt().coerceIn(0, 255)
-            val ng = (bG + ((gS - (cW shr 8 and 0xFF)) * gain).coerceIn(-26f, 26f)).roundToInt().coerceIn(0, 255)
-            val nb = (bB + ((bS - (cW and 0xFF)) * gain).coerceIn(-26f, 26f)).roundToInt().coerceIn(0, 255)
-            pO[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
-        }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pO, 0, w, 0, 0, w, h) }
-    }
-
-    private fun saveImg() {
-        val b = aiBmp ?: return; prog.visibility = View.VISIBLE
-        exec.execute {
-            val cv = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, "14T_AI_${System.currentTimeMillis()}.jpg"); put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg") }
-            contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) } }
-            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo!", Toast.LENGTH_LONG).show() }
-        }
-    }
-}
+    private fun synthTexture(src: Bitmap, detail: Float, clarity: Float): Bitmap {
+        val w = src.width; val h = src.height; val p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); val out = p.clone()
+        val med = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(src, max(32, w / 4), max(32, h / 4), true), w, h, true)
+        val pM = IntArray(w * h); med.getPixels(pM, 0, w, 0, 0, w, h)
+        val lum = IntArray(w * h) { ((p[it] shr 16 and 0xFF) * 77 + (p[it] shr 8 and 0xFF) * 150 + (p[it] and 0xFF) * 29) shr 8 }
+        val gF = detail * 1.85f; val gC = clarity * 0.65f; val ch = max(1, (h - 2) / cores)
+        (0 until cores).map { t ->
+            val y0 = (1 + t * ch).coerceAtMost(h - 1); val y1 = if (t == cores - 1) h - 1 else (y0 + ch).coerceAtMost(h - 1)
+            pool.submit {
+                for (y in y0 until y1) {
+                    val r = y * w
+                    for (x in 1 until w - 1) {
+                        val i = r + x; val c = p[i]; val cm = pM[i]; val lC = lum[i]
+                        val blur = (lC * 4 + (lum[i - w] + lum[i + w] + lum[i - 1] + lum[i + 1]) * 2 + lum[i - w - 1] + lum[i - w + 1] + lum[i + w - 1] + lum[i + w + 1]) shr 4
+                        val hf = lC - blur; val lM = ((cm shr 16 and 0xFF) * 77 + (cm shr 8 and 0xFF) * 150 + (cm and 0xFF) * 29) shr 8
+                        val d = ((if (abs(hf) > 1) (hf * gF).coerceIn(-22f, 22f) else 0f)
