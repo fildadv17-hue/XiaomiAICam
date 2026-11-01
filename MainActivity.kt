@@ -33,9 +33,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var prog: ProgressBar
     private lateinit var swAi: Switch
     private lateinit var btnLeica: Button
-    private lateinit var sbB: SeekBar
-    private lateinit var sbC: SeekBar
+    private lateinit var sbSplit: SeekBar
     private lateinit var sbS: SeekBar
+    private lateinit var sbC: SeekBar
     private lateinit var sbD: SeekBar
 
     private var imgCap: ImageCapture? = null
@@ -45,8 +45,9 @@ class MainActivity : AppCompatActivity() {
     private var maxHw = 20f
     private var swZoom = 1f
     private var leicaAuthentic = false
-    private var baseBmp: Bitmap? = null
-    private var edBmp: Bitmap? = null
+
+    private var rawBmp: Bitmap? = null
+    private var aiBmp: Bitmap? = null
 
     private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         if (it) startCam() else Toast.makeText(this, "Povol přístup ke kameře", Toast.LENGTH_LONG).show()
@@ -92,10 +93,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         swAi = Switch(this).apply {
-            text = " AI "; isChecked = true; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+            text = " HD AI "; isChecked = true; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
         }
         top.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        top.addView(btnLeica, LinearLayout.LayoutParams(WRAP_CONTENT, 84).apply { rightMargin = 16 })
+        top.addView(btnLeica, LinearLayout.LayoutParams(WRAP_CONTENT, 84).apply { rightMargin = 12 })
         top.addView(swAi)
         camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(24, 52, 24, 0) })
 
@@ -120,50 +121,66 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         bot.addView(Button(this).apply {
-            text = "CAPTURE • XIAOMI 14T AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            text = "CAPTURE • TRUE-DETAIL AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
             background = glass(0xEEFF6900, 0xBBCC2200, 0xCCFFFFFF, 60f)
             setOnClickListener { takePhoto() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 138))
         camLay.addView(bot, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 36) })
 
         edLay = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#090C12")); visibility = View.GONE; setPadding(28, 48, 28, 32)
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#090C12")); visibility = View.GONE; setPadding(24, 44, 24, 28)
         }
         tvStatus = TextView(this).apply {
-            setTextColor(Color.parseColor("#70F3FF")); textSize = 13f; typeface = Typeface.DEFAULT_BOLD; setPadding(28, 20, 28, 20)
+            setTextColor(Color.parseColor("#70F3FF")); textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setPadding(24, 16, 24, 16)
             background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f)
         }
-        edLay.addView(tvStatus, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 12 })
+        edLay.addView(tvStatus, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 10 })
         ivEd = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 12 })
+        edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 10 })
 
         val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setPadding(32, 24, 32, 24)
-            background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 56f)
+            orientation = LinearLayout.VERTICAL; setPadding(28, 20, 28, 20)
+            background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 52f)
         }
-        card.addView(Button(this).apply {
-            text = "✨ Xiaomi 14T AI 2x Super-Res (Ultra Clean)"
-            setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-            background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 44f)
-            setOnClickListener { upscale2x() }
-        }, LinearLayout.LayoutParams(MATCH_PARENT, 118).apply { bottomMargin = 12 })
 
-        sbB = slider(card, "Leica Exposure", 200, 100)
-        sbC = slider(card, "Micro Contrast", 200, 100)
-        sbS = slider(card, "Optical Acutance (No-Grain)", 100, 20)
-        sbD = slider(card, "IMX906 Chroma Denoise", 100, 40)
+        // Posuvník PŘED / PO (Split-Screen Compare)
+        val tvSplit = TextView(this).apply {
+            text = "↔ Posuvník porovnání: VLEVO Bez AI | VPRAVO S AI"
+            setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
+        }
+        card.addView(tvSplit)
+        sbSplit = SeekBar(this).apply {
+            max = 100; progress = 50
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) { renderSplitView() }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        card.addView(sbSplit, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 8 })
+
+        card.addView(Button(this).apply {
+            text = "✨ True-Detail 2x Upscale (Zachovat poměr stran)"
+            setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 40f)
+            setOnClickListener { upscale2x() }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, 110).apply { bottomMargin = 8 })
+
+        sbS = slider(card, "AI Crisp Micro-Edges (Ostrost)", 100, 55)
+        sbC = slider(card, "Local Clarity & Contrast", 200, 112)
+        sbD = slider(card, "Smart Surface Denoise (Bez rozmazání)", 100, 25)
 
         val act = LinearLayout(this)
         act.addView(Button(this).apply {
             text = "Retake"; setTextColor(Color.WHITE); background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f)
             setOnClickListener { edLay.visibility = View.GONE; camLay.visibility = View.VISIBLE }
-        }, LinearLayout.LayoutParams(0, 118, 1f).apply { rightMargin = 10 })
+        }, LinearLayout.LayoutParams(0, 112, 1f).apply { rightMargin = 10 })
         act.addView(Button(this).apply {
-            text = "Save Gallery"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+            text = "Save AI Photo"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
             background = glass(0xDD00E676, 0xAA00B0FF, 0xBBFFFFFF, 40f)
             setOnClickListener { saveImg() }
-        }, LinearLayout.LayoutParams(0, 118, 1f).apply { leftMargin = 10 })
-        card.addView(act, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 12 })
+        }, LinearLayout.LayoutParams(0, 112, 1f).apply { leftMargin = 10 })
+        card.addView(act, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 10 })
         edLay.addView(card, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
         prog = ProgressBar(this).apply { visibility = View.GONE }
@@ -174,13 +191,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun slider(p: LinearLayout, txt: String, m: Int, d: Int): SeekBar {
-        p.addView(TextView(this).apply { text = txt; setTextColor(Color.WHITE); textSize = 12f })
+        p.addView(TextView(this).apply { text = txt; setTextColor(Color.WHITE); textSize = 11f })
         return SeekBar(this).apply {
             max = m; progress = d
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) { if (u) updateEd() }
+                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {}
                 override fun onStartTrackingTouch(s: SeekBar?) {}
-                override fun onStopTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) { recalculateAi() }
             })
             p.addView(this)
         }
@@ -198,7 +215,6 @@ class MainActivity : AppCompatActivity() {
             Camera2Interop.Extender(capBuilder)
                 .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
                 .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
-                .setCaptureRequestOption(CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE, CaptureRequest.COLOR_CORRECTION_ABERRATION_MODE_HIGH_QUALITY)
             imgCap = capBuilder.build()
             try {
                 p.unbindAll()
@@ -227,21 +243,17 @@ class MainActivity : AppCompatActivity() {
                 val buf: ByteBuffer = img.planes[0].buffer
                 val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
                 img.close()
-                val ai = swAi.isChecked; val z = curZoom; val auth = leicaAuthentic
                 exec.execute {
                     var b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
-                    b = crop(b, swZoom)
-                    if (ai) {
-                        b = smoothBlurDenoise(b, if (z > 8f) 0.70f else 0.45f)
-                        b = softHaloSharpen(b, if (z > 8f) 0.35f else 0.25f)
-                    }
-                    b = if (auth) color(b, -4f, 1.14f, 0.92f) else color(b, 2f, 1.06f, 1.14f)
-                    baseBmp = b; edBmp = b
+                    b = cropAspectPreserved(b, swZoom)
+                    rawBmp = b
+                    aiBmp = runSobelCrispAi(b, 0.55f, 1.12f, 0.25f, leicaAuthentic)
                     runOnUiThread {
                         prog.visibility = View.GONE
-                        sbB.progress = 100; sbC.progress = 100; sbS.progress = 20; sbD.progress = 40
-                        showEd()
+                        sbSplit.progress = 50; sbS.progress = 55; sbC.progress = 112; sbD.progress = 25
+                        camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE
+                        renderSplitView()
                     }
                 }
             }
@@ -249,122 +261,153 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun showEd() {
-        val b = edBmp ?: return
-        camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE
-        ivEd.setImageBitmap(b)
-        tvStatus.text = "XIAOMI 14T LEICA AI • ${b.width} x ${b.height} px"
-    }
-
-    private fun updateEd() {
-        val src = baseBmp ?: return
-        val b = (sbB.progress - 100).toFloat(); val c = sbC.progress / 100f
-        val s = sbS.progress / 100f; val d = sbD.progress / 100f
+    private fun recalculateAi() {
+        val orig = rawBmp ?: return
+        prog.visibility = View.VISIBLE
+        val s = sbS.progress / 100f
+        val c = sbC.progress / 100f
+        val d = sbD.progress / 100f
+        val auth = leicaAuthentic
         exec.execute {
-            var r = color(src, b, c, 1.0f)
-            if (d > 0.05f) r = smoothBlurDenoise(r, d)
-            if (s > 0.05f) r = softHaloSharpen(r, s * 0.5f)
-            edBmp = r
-            runOnUiThread { ivEd.setImageBitmap(r); tvStatus.text = "XIAOMI 14T LEICA AI • ${r.width} x ${r.height} px" }
+            aiBmp = runSobelCrispAi(orig, s, c, d, auth)
+            runOnUiThread {
+                prog.visibility = View.GONE
+                renderSplitView()
+            }
         }
     }
 
+    // Vykreslí vlevo originál (Bez AI), vpravo upravenou fotku (S AI) a posuvnou dělicí čáru
+    private fun renderSplitView() {
+        val orig = rawBmp ?: return
+        val ai = aiBmp ?: return
+        val w = ai.width; val h = ai.height
+        val splitRatio = sbSplit.progress / 100f
+        val splitX = (w * splitRatio).roundToInt().coerceIn(0, w)
+
+        val comp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(comp)
+        // Vpravo (nebo na celé ploše) vykreslíme AI verzi
+        canvas.drawBitmap(ai, 0f, 0f, null)
+
+        // Vlevo od posuvníku ořízneme a vykreslíme původní fotku BEZ AI
+        if (splitX > 0) {
+            canvas.save()
+            canvas.clipRect(0, 0, splitX, h)
+            val srcRect = Rect(0, 0, orig.width, orig.height)
+            val dstRect = Rect(0, 0, w, h)
+            canvas.drawBitmap(orig, srcRect, dstRect, null)
+            canvas.restore()
+        }
+
+        // Vykreslení posuvné čáry a štítků BEZ AI / S AI
+        if (splitX in 2..(w - 2)) {
+            val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.parseColor("#00E5FF")
+                strokeWidth = max(4f, w * 0.004f)
+            }
+            canvas.drawLine(splitX.toFloat(), 0f, splitX.toFloat(), h.toFloat(), linePaint)
+
+            val txtPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = max(28f, w * 0.028f)
+                typeface = Typeface.DEFAULT_BOLD
+                setShadowLayer(8f, 0f, 2f, Color.BLACK)
+            }
+            if (splitX > w * 0.18f) canvas.drawText("◀ BEZ AI", 32f, h * 0.08f, txtPaint)
+            if (splitX < w * 0.82f) canvas.drawText("S AI ▶", splitX + 28f, h * 0.08f, txtPaint)
+        }
+
+        ivEd.setImageBitmap(comp)
+        val pct = (100 - sbSplit.progress)
+        tvStatus.text = "14T TRUE-DETAIL • ${w}x${h} px (AI krytí: $pct%)"
+    }
+
+    // Pravý Pixel-Level Sobel Edge-Guided AI (nikdy nerozmazává fotku zmenšováním!)
+    private fun runSobelCrispAi(src: Bitmap, sharpAmt: Float, contrast: Float, denoiseAmt: Float, authentic: Boolean): Bitmap {
+        val w = src.width; val h = src.height
+        val p = IntArray(w * h)
+        src.getPixels(p, 0, w, 0, 0, w, h)
+        val out = p.clone()
+
+        // Rychlý převod jasu (Luma) pro přesnou detekci hran
+        val luma = IntArray(w * h)
+        for (i in p.indices) {
+            val c = p[i]
+            luma[i] = ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 150 + (c and 0xFF) * 29) shr 8
+        }
+
+        val sharpGain = sharpAmt * 1.35f
+        val denoiseThr = (14 + denoiseAmt * 38).toInt()
+        val denoiseStr = (denoiseAmt * 0.65f).coerceIn(0f, 0.7f)
+
+        for (y in 1 until h - 1) {
+            val row = y * w
+            for (x in 1 until w - 1) {
+                val i = row + x
+                val c = p[i]
+                val r = c shr 16 and 0xFF; val g = c shr 8 and 0xFF; val b = c and 0xFF
+                val lum = luma[i]
+
+                // 3x3 okolí pro Sobelův gradient a detailní Unsharp Masku
+                val lT = luma[i - w]; val lB = luma[i + w]; val lL = luma[i - 1]; val lR = luma[i + 1]
+                val lTL = luma[i - w - 1]; val lTR = luma[i - w + 1]; val lBL = luma[i + w - 1]; val lBR = luma[i + w + 1]
+
+                // Sobelův horizontální a vertikální gradient (pozná skutečnou hranu od šumu)
+                val gx = (lTR + 2 * lR + lBR) - (lTL + 2 * lL + lBL)
+                val gy = (lBL + 2 * lB + lBR) - (lTL + 2 * lT + lTR)
+                val edgeMag = (abs(gx) + abs(gy)) shr 2
+
+                val avgLum = (lT + lB + lL + lR + lTL + lTR + lBL + lBR) shr 3
+                val detail = lum - avgLum
+
+                var delta = 0
+                if (edgeMag > 16) {
+                    // Jsme na skutečné hraně nebo textuře -> čisté mikro-doostření bez rozmazání
+                    val edgeWeight = ((edgeMag - 16) / 48f).coerceIn(0.2f, 1.0f)
+                    delta = (detail * sharpGain * edgeWeight).roundToInt().coerceIn(-28, 28)
+                } else if (denoiseAmt > 0.05f && abs(detail) < denoiseThr) {
+                    // Jsme na zcela hladké ploše mimo hrany -> jemné vyhlazení šumu senzoru
+                    delta = (-detail * denoiseStr).roundToInt()
+                }
+
+                val nr = (r + delta).coerceIn(0, 255)
+                val ng = (g + delta).coerceIn(0, 255)
+                val nb = (b + delta).coerceIn(0, 255)
+                out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+            }
+        }
+
+        val crispBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+        val sat = if (authentic) 0.95f else 1.12f
+        val br = if (authentic) -2f else 3f
+        return color(crispBmp, br, contrast, sat)
+    }
+
+    // 2x Upscale, který striktně zachovává poměr stran 4:3 (žádné deformování na čtverec 4096x4096!)
     private fun upscale2x() {
-        val src = edBmp ?: return
+        val orig = rawBmp ?: return
         prog.visibility = View.VISIBLE
-        Toast.makeText(this, "Xiaomi 14T AI Super-Res...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "True-Detail 2x Upscaling...", Toast.LENGTH_SHORT).show()
+        val s = sbS.progress / 100f; val c = sbC.progress / 100f; val d = sbD.progress / 100f; val auth = leicaAuthentic
         exec.execute {
-            val w = min(src.width * 2, 4096); val h = min(src.height * 2, 4096)
-            var b = smoothBlurDenoise(src, 0.75f)
-            b = Bitmap.createScaledBitmap(b, (src.width + w) / 2, (src.height + h) / 2, true)
-            b = Bitmap.createScaledBitmap(b, w, h, true)
-            b = smoothBlurDenoise(b, 0.45f)
-            b = softHaloSharpen(b, 0.38f)
-            baseBmp = b; edBmp = b
-            runOnUiThread { prog.visibility = View.GONE; showEd(); Toast.makeText(this, "Leica 2x Super-Res Hotovo!", Toast.LENGTH_SHORT).show() }
+            val scale = min(2.0f, 4096f / max(orig.width, orig.height))
+            val targetW = (orig.width * scale).roundToInt()
+            val targetH = (orig.height * scale).roundToInt()
+            val upRaw = Bitmap.createScaledBitmap(orig, targetW, targetH, true)
+            rawBmp = upRaw
+            aiBmp = runSobelCrispAi(upRaw, (s + 0.15f).coerceAtMost(1.0f), c, d, auth)
+            runOnUiThread {
+                prog.visibility = View.GONE
+                renderSplitView()
+                Toast.makeText(this, "Upscale ${targetW}x${targetH} px hotov!", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
-    private fun crop(s: Bitmap, f: Float): Bitmap {
+    private fun cropAspectPreserved(s: Bitmap, f: Float): Bitmap {
         if (f <= 1.02f) return s
-        val cw = max(64, (s.width / f).roundToInt()); val ch = max(64, (s.height / f).roundToInt())
-        return Bitmap.createScaledBitmap(Bitmap.createBitmap(s, (s.width - cw) / 2, (s.height - ch) / 2, cw, ch), s.width, s.height, true)
-    }
-
-    private fun color(s: Bitmap, b: Float, c: Float, sat: Float): Bitmap {
-        val out = Bitmap.createBitmap(s.width, s.height, Bitmap.Config.ARGB_8888)
-        val t = (-0.5f * c + 0.5f) * 255f + b
-        val cm = ColorMatrix(floatArrayOf(c, 0f, 0f, 0f, t, 0f, c, 0f, 0f, t, 0f, 0f, c, 0f, t, 0f, 0f, 0f, 1f, 0f))
-        cm.postConcat(ColorMatrix().apply { setSaturation(sat) })
-        Canvas(out).drawBitmap(s, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(cm) })
-        return out
-    }
-
-    // Čisté vyhlazení šumu přes hardwarovou bikubickou interpolaci + zachování hran (nikdy nevytváří zrnění)
-    private fun smoothBlurDenoise(s: Bitmap, str: Float): Bitmap {
-        val w = s.width; val h = s.height
-        val factor = (1f - str * 0.45f).coerceIn(0.45f, 0.92f)
-        val small = Bitmap.createScaledBitmap(s, max(32, (w * factor).roundToInt()), max(32, (h * factor).roundToInt()), true)
-        val smooth = Bitmap.createScaledBitmap(small, w, h, true)
-        val pOrig = IntArray(w * h); val pSmooth = IntArray(w * h)
-        s.getPixels(pOrig, 0, w, 0, 0, w, h); smooth.getPixels(pSmooth, 0, w, 0, 0, w, h)
-        val thr = (32 + str * 60).toInt()
-        val bl = str.coerceIn(0.15f, 0.85f)
-        for (i in pOrig.indices) {
-            val c1 = pOrig[i]; val c2 = pSmooth[i]
-            val r1 = c1 shr 16 and 0xFF; val g1 = c1 shr 8 and 0xFF; val b1 = c1 and 0xFF
-            val r2 = c2 shr 16 and 0xFF; val g2 = c2 shr 8 and 0xFF; val b2 = c2 and 0xFF
-            val diff = abs(r1 - r2) + abs(g1 - g2) + abs(b1 - b2)
-            // Pokud je rozdíl malý (šum na ploše), vyhladíme ho; pokud je to ostrá hrana, necháme ji ostrou
-            if (diff < thr) {
-                val nr = (r1 * (1f - bl) + r2 * bl).roundToInt().coerceIn(0, 255)
-                val ng = (g1 * (1f - bl) + g2 * bl).roundToInt().coerceIn(0, 255)
-                val nb = (b1 * (1f - bl) + b2 * bl).roundToInt().coerceIn(0, 255)
-                pOrig[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
-            }
-        }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pOrig, 0, w, 0, 0, w, h) }
-    }
-
-    // Jemné optické doostření s omezením maximální změny o ±18 úrovní jasu (žádné bílé tečky ani zrno)
-    private fun softHaloSharpen(s: Bitmap, amt: Float): Bitmap {
-        val w = s.width; val h = s.height
-        val half = Bitmap.createScaledBitmap(s, max(32, w / 2), max(32, h / 2), true)
-        val blur = Bitmap.createScaledBitmap(half, w, h, true)
-        val pOrig = IntArray(w * h); val pBlur = IntArray(w * h)
-        s.getPixels(pOrig, 0, w, 0, 0, w, h); blur.getPixels(pBlur, 0, w, 0, 0, w, h)
-        val gain = amt.coerceIn(0.05f, 0.65f)
-        for (i in pOrig.indices) {
-            val c1 = pOrig[i]; val c2 = pBlur[i]
-            val r1 = c1 shr 16 and 0xFF; val g1 = c1 shr 8 and 0xFF; val b1 = c1 and 0xFF
-            val r2 = c2 shr 16 and 0xFF; val g2 = c2 shr 8 and 0xFF; val b2 = c2 and 0xFF
-            val dr = r1 - r2; val dg = g1 - g2; val db = b1 - b2
-            val lumDiff = (abs(dr) + abs(dg) + abs(db)) / 3
-            if (lumDiff < 8) continue // Ignorujeme jemný šum
-            val boostR = (dr * gain).roundToInt().coerceIn(-18, 18)
-            val boostG = (dg * gain).roundToInt().coerceIn(-18, 18)
-            val boostB = (db * gain).roundToInt().coerceIn(-18, 18)
-            val nr = (r1 + boostR).coerceIn(0, 255)
-            val ng = (g1 + boostG).coerceIn(0, 255)
-            val nb = (b1 + boostB).coerceIn(0, 255)
-            pOrig[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
-        }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pOrig, 0, w, 0, 0, w, h) }
-    }
-
-    private fun saveImg() {
-        val b = edBmp ?: return
-        prog.visibility = View.VISIBLE
-        exec.execute {
-            val cv = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "Xiaomi14T_Leica_${System.currentTimeMillis()}.jpg")
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/XiaomiAICam")
-            }
-            contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let {
-                contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) }
-            }
-            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo do Galerie!", Toast.LENGTH_LONG).show() }
-        }
-    }
-}
+        val cw = max(64, (s.width / f).roundToInt())
+        val ch = max(64, (s.height / f).roundToInt())
+        val cropped = Bitmap.createBitmap(s, (s.width - cw) / 2, (s.height - ch) / 2, cw, ch)
+        return Bitmap.createScaledBitmap(cropped, s.width, s.height, true)
