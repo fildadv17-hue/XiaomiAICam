@@ -221,7 +221,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val btnUpscale = Button(this).apply {
-            text = "✨ AI Super-Res 2x (Denoise + Micro-Detail)"
+            text = "AI Super-Res 2x (Denoise + Micro-Detail)"
             background = liquidAccentButtonDrawable(0xCC00C6FF.toInt(), 0xAA0072FF.toInt(), 48f)
             setTextColor(Color.WHITE)
             typeface = Typeface.DEFAULT_BOLD
@@ -238,7 +238,6 @@ class MainActivity : AppCompatActivity() {
 
         val actionRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            topMargin = 16
         }
         val btnBack = Button(this).apply {
             text = "Retake"
@@ -367,14 +366,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun runSmartAiPipeline(src: Bitmap, zoom: Float): Bitmap {
         var work = src
-        // 1. Edge-preserving AI denoise (stronger on higher digital zoom)
         val denoiseStrength = if (zoom > 10f) 0.65f else if (zoom > 3f) 0.40f else 0.20f
         work = edgePreservingDenoise(work, denoiseStrength)
-
-        // 2. Adaptive HDR Tone & Local Contrast Boost
         work = autoHdrToneMapping(work)
-
-        // 3. Multi-pass Unsharp Masking for fine texture recovery
         val sharpStrength = if (zoom > 15f) 0.85f else 0.60f
         work = sharpenBitmap(work, sharpStrength)
         return work
@@ -413,14 +407,11 @@ class MainActivity : AppCompatActivity() {
         bgExecutor.execute {
             val w = min(src.width * 2, 4096)
             val h = min(src.height * 2, 4096)
-            // Pre-clean noise before 2x upscale
             val cleaned = edgePreservingDenoise(src, 0.45f)
-            // Step-up interpolation for smoother diagonal edges
             val midW = (src.width + w) / 2
             val midH = (src.height + h) / 2
             val midBmp = Bitmap.createScaledBitmap(cleaned, midW, midH, true)
             val scaled = Bitmap.createScaledBitmap(midBmp, w, h, true)
-            // High-frequency detail reconstruction
             val sharp = sharpenBitmap(scaled, 0.82f)
             val finalBmp = adjustColors(sharp, 3f, 1.06f, 1.10f)
             baseBitmap = finalBmp
@@ -478,4 +469,17 @@ class MainActivity : AppCompatActivity() {
             cm.postConcat(satMatrix)
         }
         paint.colorFilter = ColorMatrixColorFilter(cm)
-        canvas.drawBitmap(src, 0f
+        canvas.drawBitmap(src, 0f, 0f, paint)
+        return out
+    }
+
+    private fun edgePreservingDenoise(src: Bitmap, strength: Float): Bitmap {
+        val w = src.width
+        val h = src.height
+        val pix = IntArray(w * h)
+        val out = pix.clone()
+        src.getPixels(pix, 0, w, 0, 0, w, h)
+        val threshold = (18 + strength * 42).toInt()
+        val blend = strength.coerceIn(0.05f, 0.85f)
+
+        f
