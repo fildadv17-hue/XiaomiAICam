@@ -40,20 +40,14 @@ class MainActivity : AppCompatActivity() {
     private var imgCap: ImageCapture? = null
     private var cam: androidx.camera.core.Camera? = null
     private val exec = Executors.newSingleThreadExecutor()
-    private var curZoom = 1f
-    private var maxHw = 20f
-    private var swZoom = 1f
+    private var curZoom = 1f; private var maxHw = 20f; private var swZoom = 1f
     private var leicaAuth = false
-    private var rawBmp: Bitmap? = null
-    private var aiBmp: Bitmap? = null
+    private var rawBmp: Bitmap? = null; private var aiBmp: Bitmap? = null
 
-    private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-        if (it) startCam() else Toast.makeText(this, "Povol kameru", Toast.LENGTH_LONG).show()
-    }
+    private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCam() }
 
     override fun onCreate(s: Bundle?) {
-        super.onCreate(s)
-        buildUi()
+        super.onCreate(s); buildUi()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCam()
         else perm.launch(Manifest.permission.CAMERA)
     }
@@ -159,18 +153,11 @@ class MainActivity : AppCompatActivity() {
     private fun startCam() {
         val f = ProcessCameraProvider.getInstance(this)
         f.addListener({
-            val p = f.get()
-            val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+            val p = f.get(); val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
             val cb = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).setJpegQuality(100)
-            Camera2Interop.Extender(cb)
-                .setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
-                .setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+            Camera2Interop.Extender(cb).setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY).setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
             imgCap = cb.build()
-            try {
-                p.unbindAll()
-                cam = p.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, prev, imgCap)
-                cam?.cameraInfo?.zoomState?.observe(this) { maxHw = it.maxZoomRatio.coerceAtLeast(1f) }
-            } catch (e: Exception) {}
+            try { p.unbindAll(); cam = p.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, prev, imgCap); cam?.cameraInfo?.zoomState?.observe(this) { maxHw = it.maxZoomRatio.coerceAtLeast(1f) } } catch (e: Exception) {}
         }, ContextCompat.getMainExecutor(this))
     }
 
@@ -190,8 +177,7 @@ class MainActivity : AppCompatActivity() {
                 exec.execute {
                     var b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
-                    b = smoothCrop(b, swZoom)
-                    rawBmp = b; aiBmp = vectorSmoothAi(b, 0.75f, 0.55f, 1.10f, leicaAuth)
+                    b = smoothCrop(b, swZoom); rawBmp = b; aiBmp = vectorSmoothAi(b, 0.75f, 0.55f, 1.10f, leicaAuth)
                     runOnUiThread {
                         prog.visibility = View.GONE; sbSplit.progress = 50; sbD.progress = 75; sbS.progress = 55; sbC.progress = 110
                         camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit()
@@ -214,91 +200,55 @@ class MainActivity : AppCompatActivity() {
         val comp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); val cv = Canvas(comp)
         val pnt = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
         cv.drawBitmap(ai, 0f, 0f, pnt)
-        if (splitX > 0) {
-            cv.save(); cv.clipRect(0, 0, splitX, h)
-            cv.drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, w, h), pnt); cv.restore()
-        }
+        if (splitX > 0) { cv.save(); cv.clipRect(0, 0, splitX, h); cv.drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, w, h), pnt); cv.restore() }
         if (splitX in 2..(w - 2)) {
             cv.drawLine(splitX.toFloat(), 0f, splitX.toFloat(), h.toFloat(), Paint().apply { color = Color.CYAN; strokeWidth = max(4f, w * 0.004f) })
             val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = max(26f, w * 0.028f); typeface = Typeface.DEFAULT_BOLD; setShadowLayer(8f, 0f, 2f, Color.BLACK) }
             if (splitX > w * 0.2f) cv.drawText("◀ ORIGINÁL", 28f, h * 0.08f, tp)
             if (splitX < w * 0.8f) cv.drawText("VECTOR AI ▶", splitX + 24f, h * 0.08f, tp)
         }
-        ivEd.setImageBitmap(comp)
-        tvStatus.text = "14T VECTOR-SMOOTH • ${w}x${h} px"
+        ivEd.setImageBitmap(comp); tvStatus.text = "14T VECTOR-SMOOTH • ${w}x${h} px"
     }
 
-    // Skutečný 2D Box-Gaussian Blur s nastavitelným poloměrem, který 100% rozpustí čtverečky a schody na hranách
-    private fun boxBlur(pix: IntArray, w: Int, h: Int, radius: Int): IntArray {
-        if (radius < 1) return pix.clone()
-        val tmp = IntArray(w * h); val out = IntArray(w * h)
-        val div = 2 * radius + 1
+    private fun boxBlur(pix: IntArray, w: Int, h: Int, rad: Int): IntArray {
+        if (rad < 1) return pix.clone()
+        val tmp = IntArray(w * h); val out = IntArray(w * h); val div = 2 * rad + 1
         for (y in 0 until h) {
             val row = y * w
             for (x in 0 until w) {
                 var r = 0; var g = 0; var b = 0
-                for (k in -radius..radius) {
-                    val c = pix[row + (x + k).coerceIn(0, w - 1)]
-                    r += c shr 16 and 0xFF; g += c shr 8 and 0xFF; b += c and 0xFF
-                }
+                for (k in -rad..rad) { val c = pix[row + (x + k).coerceIn(0, w - 1)]; r += c shr 16 and 0xFF; g += c shr 8 and 0xFF; b += c and 0xFF }
                 tmp[row + x] = (0xFF shl 24) or ((r / div) shl 16) or ((g / div) shl 8) or (b / div)
             }
         }
         for (x in 0 until w) {
             for (y in 0 until h) {
                 var r = 0; var g = 0; var b = 0
-                for (k in -radius..radius) {
-                    val c = tmp[(y + k).coerceIn(0, h - 1) * w + x]
-                    r += c shr 16 and 0xFF; g += c shr 8 and 0xFF; b += c and 0xFF
-                }
+                for (k in -rad..rad) { val c = tmp[(y + k).coerceIn(0, h - 1) * w + x]; r += c shr 16 and 0xFF; g += c shr 8 and 0xFF; b += c and 0xFF }
                 out[y * w + x] = (0xFF shl 24) or ((r / div) shl 16) or ((g / div) shl 8) or (b / div)
             }
         }
         return out
     }
 
-    // Vector-Smooth AI: 2-průchodový Gaussovský filtr rozpustí kostičky + hladká rekonstrukce obrysů
-    private fun vectorSmoothAi(src: Bitmap, meltStr: Float, edgeShape: Float, co: Float, auth: Boolean): Bitmap {
-        val w = src.width; val h = src.height
-        val pOrig = IntArray(w * h); src.getPixels(pOrig, 0, w, 0, 0, w, h)
-
-        // 1. Rozpuštění kostiček (2 průchody = pravá Gaussovská křivka)
-        val radFine = max(1, (1 + meltStr * 4.5f).roundToInt())
-        var pSmooth = boxBlur(pOrig, w, h, radFine)
-        pSmooth = boxBlur(pSmooth, w, h, max(1, radFine / 2))
-
-        // 2. Široký referenční poloměr pro stíny a tvarování obrysů (nikdy nedělá pixelové hrany)
-        val pWide = boxBlur(pSmooth, w, h, radFine + 3)
-
-        val gain = edgeShape * 1.8f
-        val thr = (35 + meltStr * 85).toInt()
-        val blend = (0.35f + meltStr * 0.62f).coerceIn(0.2f, 0.96f)
-
-        for (i in pOrig.indices) {
-            val cO = pOrig[i]; val cS = pSmooth[i]; val cW = pWide[i]
+    private fun vectorSmoothAi(src: Bitmap, melt: Float, shape: Float, co: Float, auth: Boolean): Bitmap {
+        val w = src.width; val h = src.height; val pO = IntArray(w * h); src.getPixels(pO, 0, w, 0, 0, w, h)
+        val rf = max(1, (1 + melt * 4.5f).roundToInt())
+        val pS = boxBlur(boxBlur(pO, w, h, rf), w, h, max(1, rf / 2))
+        val pW = boxBlur(pS, w, h, rf + 3)
+        val gain = shape * 1.8f; val thr = (35 + melt * 85).toInt(); val bl = (0.35f + melt * 0.62f).coerceIn(0.2f, 0.96f)
+        for (i in pO.indices) {
+            val cO = pO[i]; val cS = pS[i]; val cW = pW[i]
             val rO = cO shr 16 and 0xFF; val gO = cO shr 8 and 0xFF; val bO = cO and 0xFF
             val rS = cS shr 16 and 0xFF; val gS = cS shr 8 and 0xFF; val bS = cS and 0xFF
-            val rW = cW shr 16 and 0xFF; val gW = cW shr 8 and 0xFF; val bW = cW and 0xFF
-
             val diff = abs(rO - rS) + abs(gO - gS) + abs(bO - bS)
-            // Silné vyhlazení kostiček všude včetně hran
-            val wM = if (diff < thr) blend else blend * 0.72f
-            val mR = rO * (1f - wM) + rS * wM
-            val mG = gO * (1f - wM) + gS * wM
-            val mB = bO * (1f - wM) + bS * wM
-
-            // Re-shaping: doostřujeme JEMNĚ VYHLAZENÝ obraz (cS - cW), nikoliv čtverečkovaný originál!
-            val shR = ((rS - rW) * gain).coerceIn(-28f, 28f)
-            val shG = ((gS - gW) * gain).coerceIn(-28f, 28f)
-            val shB = ((bS - bW) * gain).coerceIn(-28f, 28f)
-
-            val nr = (mR + shR).roundToInt().coerceIn(0, 255)
-            val ng = (mG + shG).roundToInt().coerceIn(0, 255)
-            val nb = (mB + shB).roundToInt().coerceIn(0, 255)
-            pOrig[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+            val wM = if (diff < thr) bl else bl * 0.72f
+            val nr = (rO * (1f - wM) + rS * wM + ((rS - (cW shr 16 and 0xFF)) * gain).coerceIn(-28f, 28f)).roundToInt().coerceIn(0, 255)
+            val ng = (gO * (1f - wM) + gS * wM + ((gS - (cW shr 8 and 0xFF)) * gain).coerceIn(-28f, 28f)).roundToInt().coerceIn(0, 255)
+            val nb = (bO * (1f - wM) + bS * wM + ((bS - (cW and 0xFF)) * gain).coerceIn(-28f, 28f)).roundToInt().coerceIn(0, 255)
+            pO[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
         }
-
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pOrig, 0, w, 0, 0, w, h) }
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pO, 0, w, 0, 0, w, h) }
         val t = (-0.5f * co + 0.5f) * 255f + (if (auth) -2f else 3f)
         val cm = ColorMatrix(floatArrayOf(co, 0f, 0f, 0f, t, 0f, co, 0f, 0f, t, 0f, 0f, co, 0f, t, 0f, 0f, 0f, 1f, 0f)).apply { postConcat(ColorMatrix().apply { setSaturation(if (auth) 0.96f else 1.12f) }) }
         val res = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -319,12 +269,10 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // Ořez bez umělého nafukování čtverečků na 4000px (udržuje čisté rozlišení do 1920px pro rychlý a hluboký blur)
     private fun smoothCrop(s: Bitmap, f: Float): Bitmap {
         val cw = max(120, (s.width / f).roundToInt()); val ch = max(120, (s.height / f).roundToInt())
         val crop = Bitmap.createBitmap(s, (s.width - cw) / 2, (s.height - ch) / 2, cw, ch)
-        val maxDim = 1800f
-        val sc = (maxDim / max(cw, ch)).coerceIn(1f, 2.2f)
+        val sc = (1800f / max(cw, ch)).coerceIn(1f, 2.2f)
         val tw = (cw * sc).roundToInt(); val th = (ch * sc).roundToInt()
         val out = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
         Canvas(out).drawBitmap(crop, Rect(0, 0, cw, ch), Rect(0, 0, tw, th), Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG))
@@ -335,6 +283,12 @@ class MainActivity : AppCompatActivity() {
         val b = aiBmp ?: return; prog.visibility = View.VISIBLE
         exec.execute {
             val cv = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "Xiaomi14T_VectorAI_${System.currentTimeMillis()}.jpg")
+                put(MediaStore.MediaColumns.DISPLAY_NAME, "Xiaomi14T_${System.currentTimeMillis()}.jpg")
                 put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTUR
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/XiaomiAICam")
+            }
+            contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) } }
+            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo!", Toast.LENGTH_LONG).show() }
+        }
+    }
+}
