@@ -18,9 +18,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Generate Project Structure & Build
         run: |
           mkdir -p app/src/main/java/com/example/xiaomiaicam
