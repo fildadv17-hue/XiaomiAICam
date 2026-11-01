@@ -5,14 +5,10 @@ import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
-import android.os.Build
-import android.os.Bundle
-import android.os.Environment
+import android.os.*
 import android.provider.MediaStore
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup.LayoutParams.MATCH_PARENT
-import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.*
+import android.view.ViewGroup.LayoutParams.*
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -22,345 +18,272 @@ import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
-import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
-import kotlin.math.roundToInt
+import kotlin.math.*
 
 class MainActivity : AppCompatActivity() {
-
-    private lateinit var previewView: PreviewView
-    private lateinit var cameraLayout: FrameLayout
-    private lateinit var editorLayout: LinearLayout
-    private lateinit var ivEditorPreview: ImageView
+    private lateinit var pv: PreviewView
+    private lateinit var camLay: FrameLayout
+    private lateinit var edLay: LinearLayout
+    private lateinit var ivEd: ImageView
     private lateinit var tvZoom: TextView
-    private lateinit var tvResInfo: TextView
-    private lateinit var progressOverlay: ProgressBar
-    private lateinit var switchAi: Switch
+    private lateinit var tvStatus: TextView
+    private lateinit var prog: ProgressBar
+    private lateinit var swAi: Switch
+    private lateinit var sbB: SeekBar
+    private lateinit var sbC: SeekBar
+    private lateinit var sbS: SeekBar
+    private lateinit var sbD: SeekBar
 
-    private lateinit var seekBrightness: SeekBar
-    private lateinit var seekContrast: SeekBar
-    private lateinit var seekSharpen: SeekBar
-    private lateinit var seekDenoise: SeekBar
+    private var imgCap: ImageCapture? = null
+    private var cam: androidx.camera.core.Camera? = null
+    private val exec = Executors.newSingleThreadExecutor()
+    private var curZoom = 1f
+    private var maxHw = 10f
+    private var swZoom = 1f
+    private var baseBmp: Bitmap? = null
+    private var edBmp: Bitmap? = null
 
-    private var imageCapture: ImageCapture? = null
-    private var camera: androidx.camera.core.Camera? = null
-    private val bgExecutor = Executors.newSingleThreadExecutor()
-
-    private var currentTotalZoom = 1.0f
-    private var maxHwZoom = 10.0f
-    private var currentSwZoom = 1.0f
-
-    private var baseBitmap: Bitmap? = null
-    private var editedBitmap: Bitmap? = null
-
-    private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startCamera() else Toast.makeText(this, "Camera permission required!", Toast.LENGTH_LONG).show()
+    private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        if (it) startCam() else Toast.makeText(this, "Camera permission required", Toast.LENGTH_LONG).show()
     }
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        buildCompleteUi()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            startCamera()
-        } else {
-            permLauncher.launch(Manifest.permission.CAMERA)
-        }
+    override fun onCreate(s: Bundle?) {
+        super.onCreate(s)
+        buildUi()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCam()
+        else perm.launch(Manifest.permission.CAMERA)
     }
 
-    private fun glassBg(c1: Int, c2: Int, stroke: Int, rad: Float) =
-        GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(c1, c2)).apply {
-            cornerRadius = rad
-            setStroke(3, stroke)
+    private fun glass(c1: Long, c2: Long, st: Long, r: Float) =
+        GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(c1.toInt(), c2.toInt())).apply {
+            cornerRadius = r; setStroke(3, st.toInt())
         }
 
-    private fun buildCompleteUi() {
+    private fun buildUi() {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        cameraLayout = FrameLayout(this)
-        val previewContainer = FrameLayout(this).apply { clipChildren = true }
-        previewView = PreviewView(this)
-        previewContainer.addView(previewView, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        cameraLayout.addView(previewContainer, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        camLay = FrameLayout(this)
+        pv = PreviewView(this)
+        camLay.addView(FrameLayout(this).apply { clipChildren = true; addView(pv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
-        val topBar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(40, 28, 40, 28)
-            background = glassBg(0x44FFFFFF, 0x18FFFFFF, 0x77FFFFFF, 60f)
-            gravity = Gravity.CENTER_VERTICAL
+        val top = LinearLayout(this).apply {
+            setPadding(40, 28, 40, 28); gravity = Gravity.CENTER_VERTICAL
+            background = glass(0x55FFFFFF, 0x22FFFFFF, 0x99FFFFFF, 60f)
         }
-        tvZoom = TextView(this).apply {
-            text = "1.0x AI OPTICS"
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        switchAi = Switch(this).apply {
-            text = "Liquid AI "
-            isChecked = true
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-        }
-        topBar.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        topBar.addView(switchAi, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-        cameraLayout.addView(topBar, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply {
-            setMargins(28, 56, 28, 0)
-        })
+        tvZoom = TextView(this).apply { text = "1.0x LIQUID AI"; setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD }
+        swAi = Switch(this).apply { text = "Deep AI "; isChecked = true; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD }
+        top.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        top.addView(swAi)
+        camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(28, 56, 28, 0) })
 
-        val bottomCamPanel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(36, 32, 36, 40)
-            background = glassBg(0x40FFFFFF, 0x15FFFFFF, 0x80FFFFFF.toInt(), 68f)
-            gravity = Gravity.CENTER
+        val bot = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(36, 32, 36, 40); gravity = Gravity.CENTER
+            background = glass(0x48FFFFFF, 0x18FFFFFF, 0x99FFFFFF, 68f)
         }
-
-        val seekZoom = SeekBar(this).apply { max = 990 }
-        val zoomBtnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        val sbZ = SeekBar(this).apply { max = 990 }
+        val zRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
         listOf(1f, 5f, 10f, 50f, 100f).forEach { z ->
-            val btn = Button(this).apply {
-                text = "${z.toInt()}x"
-                setTextColor(Color.WHITE)
-                textSize = 12f
-                typeface = Typeface.DEFAULT_BOLD
-                background = glassBg(0x38FFFFFF, 0x12FFFFFF, 0x66FFFFFF, 36f)
-                setOnClickListener { seekZoom.progress = ((z - 1f) * 10f).toInt() }
-            }
-            zoomBtnRow.addView(btn, LinearLayout.LayoutParams(0, 100, 1f).apply { setMargins(6, 0, 6, 0) })
+            zRow.addView(Button(this).apply {
+                text = "${z.toInt()}x"; setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
+                background = glass(0x40FFFFFF, 0x15FFFFFF, 0x77FFFFFF, 36f)
+                setOnClickListener { sbZ.progress = ((z - 1f) * 10f).toInt() }
+            }, LinearLayout.LayoutParams(0, 100, 1f).apply { setMargins(6, 0, 6, 0) })
         }
-        bottomCamPanel.addView(zoomBtnRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        bottomCamPanel.addView(seekZoom, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 24; bottomMargin = 24 })
-
-        seekZoom.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { applyHybridZoom(1.0f + p / 10.0f) }
+        bot.addView(zRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+        bot.addView(sbZ, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 24; bottomMargin = 24 })
+        sbZ.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { setZoom(1f + p / 10f) }
             override fun onStartTrackingTouch(s: SeekBar?) {}
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
+        bot.addView(Button(this).apply {
+            text = "CAPTURE • DEEP LIQUID AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xEEFF7700, 0xBBFF2200, 0xCCFFFFFF, 60f)
+            setOnClickListener { takePhoto() }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, 138))
+        camLay.addView(bot, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 36) })
 
-        val btnCapture = Button(this).apply {
-            text = "CAPTURE • LIQUID AI"
-            background = glassBg(0xDDFF7700.toInt(), 0xAAFF3300.toInt(), 0xAAFFFFFF.toInt(), 60f)
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            typeface = Typeface.DEFAULT_BOLD
-            setOnClickListener { capturePhoto() }
+        edLay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#090C12")); visibility = View.GONE; setPadding(28, 48, 28, 32)
         }
-        bottomCamPanel.addView(btnCapture, LinearLayout.LayoutParams(MATCH_PARENT, 140))
-        cameraLayout.addView(bottomCamPanel, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply {
-            setMargins(24, 0, 24, 36)
-        })
-
-        editorLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#0B0E14"))
-            visibility = View.GONE
-            setPadding(28, 48, 28, 32)
+        tvStatus = TextView(this).apply {
+            setTextColor(Color.parseColor("#70F3FF")); textSize = 13f; typeface = Typeface.DEFAULT_BOLD; setPadding(28, 20, 28, 20)
+            background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f)
         }
+        edLay.addView(tvStatus, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 12 })
+        ivEd = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 12 })
 
-        tvResInfo = TextView(this).apply {
-            setTextColor(Color.parseColor("#70F3FF"))
-            textSize = 14f
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(24, 16, 24, 16)
-            background = glassBg(0x33FFFFFF, 0x11FFFFFF, 0x55FFFFFF, 40f)
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; setPadding(32, 24, 32, 24)
+            background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 56f)
         }
-        editorLayout.addView(tvResInfo, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 12 })
+        card.addView(Button(this).apply {
+            text = "✨ Deep AI 2x Ultra-Upscale (6-Pass)"
+            setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 44f)
+            setOnClickListener { upscale2x() }
+        }, LinearLayout.LayoutParams(MATCH_PARENT, 118).apply { bottomMargin = 12 })
 
-        ivEditorPreview = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        editorLayout.addView(ivEditorPreview, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 12 })
+        sbB = slider(card, "HDR Brightness", 200, 100)
+        sbC = slider(card, "Liquid Contrast", 200, 100)
+        sbS = slider(card, "AI Micro-Detail", 100, 35)
+        sbD = slider(card, "Deep AI Denoise", 100, 25)
 
-        val controlsCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 24, 32, 24)
-            background = glassBg(0x38FFFFFF, 0x14FFFFFF, 0x77FFFFFF, 56f)
-        }
+        val act = LinearLayout(this)
+        act.addView(Button(this).apply {
+            text = "Retake"; setTextColor(Color.WHITE); background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f)
+            setOnClickListener { edLay.visibility = View.GONE; camLay.visibility = View.VISIBLE }
+        }, LinearLayout.LayoutParams(0, 118, 1f).apply { rightMargin = 10 })
+        act.addView(Button(this).apply {
+            text = "Save Gallery"; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+            background = glass(0xDD00E676, 0xAA00B0FF, 0xBBFFFFFF, 40f)
+            setOnClickListener { saveImg() }
+        }, LinearLayout.LayoutParams(0, 118, 1f).apply { leftMargin = 10 })
+        card.addView(act, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 12 })
+        edLay.addView(card, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-        val btnUpscale = Button(this).apply {
-            text = "AI Super-Res 2x (Denoise + Detail)"
-            background = glassBg(0xCC00C6FF.toInt(), 0xAA0072FF.toInt(), 0xAAFFFFFF.toInt(), 44f)
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            setOnClickListener { runAiUpscaler() }
-        }
-        controlsCard.addView(btnUpscale, LinearLayout.LayoutParams(MATCH_PARENT, 120).apply { bottomMargin = 12 })
-
-        seekBrightness = addSlider(controlsCard, "HDR Brightness", 200, 100)
-        seekContrast = addSlider(controlsCard, "Dynamic Contrast", 200, 100)
-        seekSharpen = addSlider(controlsCard, "AI Edge Detail", 100, 30)
-        seekDenoise = addSlider(controlsCard, "AI Astro Denoise", 100, 20)
-
-        val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val btnBack = Button(this).apply {
-            text = "Retake"
-            setTextColor(Color.WHITE)
-            background = glassBg(0x33FFFFFF, 0x11FFFFFF, 0x55FFFFFF, 40f)
-            setOnClickListener { editorLayout.visibility = View.GONE; cameraLayout.visibility = View.VISIBLE }
-        }
-        val btnSave = Button(this).apply {
-            text = "Save to Gallery"
-            background = glassBg(0xCC00E676.toInt(), 0x9900B0FF.toInt(), 0xAAFFFFFF.toInt(), 40f)
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            setOnClickListener { saveToGallery() }
-        }
-        actionRow.addView(btnBack, LinearLayout.LayoutParams(0, 120, 1f).apply { rightMargin = 10 })
-        actionRow.addView(btnSave, LinearLayout.LayoutParams(0, 120, 1f).apply { leftMargin = 10 })
-        controlsCard.addView(actionRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 12 })
-        editorLayout.addView(controlsCard, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        progressOverlay = ProgressBar(this).apply { visibility = View.GONE }
-        root.addView(cameraLayout, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        root.addView(editorLayout, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        root.addView(progressOverlay, FrameLayout.LayoutParams(150, 150, Gravity.CENTER))
+        prog = ProgressBar(this).apply { visibility = View.GONE }
+        root.addView(camLay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        root.addView(edLay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        root.addView(prog, FrameLayout.LayoutParams(160, 160, Gravity.CENTER))
         setContentView(root)
     }
 
-    private fun addSlider(parent: LinearLayout, label: String, maxVal: Int, defVal: Int): SeekBar {
-        parent.addView(TextView(this).apply { text = label; setTextColor(Color.WHITE); textSize = 12f })
+    private fun slider(p: LinearLayout, txt: String, m: Int, d: Int): SeekBar {
+        p.addView(TextView(this).apply { text = txt; setTextColor(Color.WHITE); textSize = 12f })
         return SeekBar(this).apply {
-            max = maxVal; progress = defVal
+            max = m; progress = d
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { if (fromUser) updateEditorPreview() }
+                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) { if (u) updateEd() }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {}
             })
-            parent.addView(this)
+            p.addView(this)
         }
     }
 
-    private fun startCamera() {
-        val future = ProcessCameraProvider.getInstance(this)
-        future.addListener({
-            val provider = future.get()
-            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
-            imageCapture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
+    private fun startCam() {
+        val f = ProcessCameraProvider.getInstance(this)
+        f.addListener({
+            val p = f.get()
+            val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
+            imgCap = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
             try {
-                provider.unbindAll()
-                camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, imageCapture)
-                camera?.cameraInfo?.zoomState?.observe(this) { maxHwZoom = it.maxZoomRatio.coerceAtLeast(1.0f) }
-            } catch (e: Exception) {
-                Toast.makeText(this, "Camera error: ${e.message}", Toast.LENGTH_SHORT).show()
-            }
+                p.unbindAll()
+                cam = p.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, prev, imgCap)
+                cam?.cameraInfo?.zoomState?.observe(this) { maxHw = it.maxZoomRatio.coerceAtLeast(1f) }
+            } catch (e: Exception) {}
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun applyHybridZoom(targetZoom: Float) {
-        currentTotalZoom = targetZoom.coerceIn(1.0f, 100.0f)
-        val hw = min(currentTotalZoom, maxHwZoom)
-        camera?.cameraControl?.setZoomRatio(hw)
-        currentSwZoom = (currentTotalZoom / hw).coerceAtLeast(1.0f)
-        previewView.scaleX = currentSwZoom; previewView.scaleY = currentSwZoom
-        tvZoom.text = String.format("%.1fx AI OPTICS", currentTotalZoom)
+    private fun setZoom(z: Float) {
+        curZoom = z.coerceIn(1f, 100f)
+        val hw = min(curZoom, maxHw)
+        cam?.cameraControl?.setZoomRatio(hw)
+        swZoom = (curZoom / hw).coerceAtLeast(1f)
+        pv.scaleX = swZoom; pv.scaleY = swZoom
+        tvZoom.text = String.format("%.1fx LIQUID AI", curZoom)
     }
 
-    private fun capturePhoto() {
-        val cap = imageCapture ?: return
-        progressOverlay.visibility = View.VISIBLE
+    private fun takePhoto() {
+        val cap = imgCap ?: return
+        prog.visibility = View.VISIBLE
+        Toast.makeText(this, "Deep AI processing...", Toast.LENGTH_SHORT).show()
         cap.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
-            override fun onCaptureSuccess(image: ImageProxy) {
-                val rot = image.imageInfo.rotationDegrees
-                val buf: ByteBuffer = image.planes[0].buffer
+            override fun onCaptureSuccess(img: ImageProxy) {
+                val rot = img.imageInfo.rotationDegrees
+                val buf: ByteBuffer = img.planes[0].buffer
                 val bytes = ByteArray(buf.remaining()).also { buf.get(it) }
-                image.close()
-                val autoAi = switchAi.isChecked
-                val z = currentTotalZoom
-                bgExecutor.execute {
-                    var bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (rot != 0) {
-                        val m = Matrix().apply { postRotate(rot.toFloat()) }
-                        bmp = Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, m, true)
+                img.close()
+                val ai = swAi.isChecked; val z = curZoom
+                exec.execute {
+                    var b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
+                    b = crop(b, swZoom)
+                    if (ai) {
+                        val dn = if (z > 10f) 0.72f else if (z > 3f) 0.5f else 0.3f
+                        b = denoise(b, dn)
+                        b = denoise(b, dn * 0.7f)
+                        b = color(b, 7f, 1.15f, 1.14f)
+                        b = sharp(b, if (z > 12f) 0.85f else 0.65f)
+                        b = sharp(b, 0.45f)
                     }
-                    bmp = cropZoom(bmp, currentSwZoom)
-                    if (autoAi) {
-                        bmp = edgeDenoise(bmp, if (z > 10f) 0.65f else if (z > 3f) 0.4f else 0.2f)
-                        bmp = adjustColors(bmp, 6f, 1.12f, 1.12f)
-                        bmp = sharpen(bmp, if (z > 15f) 0.85f else 0.6f)
-                    }
-                    baseBitmap = bmp; editedBitmap = bmp
+                    baseBmp = b; edBmp = b
                     runOnUiThread {
-                        progressOverlay.visibility = View.GONE
-                        seekBrightness.progress = 100; seekContrast.progress = 100
-                        seekSharpen.progress = 30; seekDenoise.progress = 20
-                        showEditor()
+                        prog.visibility = View.GONE
+                        sbB.progress = 100; sbC.progress = 100; sbS.progress = 35; sbD.progress = 25
+                        showEd()
                     }
                 }
             }
-            override fun onError(exc: ImageCaptureException) {
-                progressOverlay.visibility = View.GONE
-            }
+            override fun onError(e: ImageCaptureException) { prog.visibility = View.GONE }
         })
     }
 
-    private fun showEditor() {
-        val bmp = editedBitmap ?: return
-        cameraLayout.visibility = View.GONE; editorLayout.visibility = View.VISIBLE
-        ivEditorPreview.setImageBitmap(bmp)
-        tvResInfo.text = "LIQUID AI • ${bmp.width} x ${bmp.height} px"
+    private fun showEd() {
+        val b = edBmp ?: return
+        camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE
+        ivEd.setImageBitmap(b)
+        tvStatus.text = "LIQUID GLASS AI • ${b.width} x ${b.height} px"
     }
 
-    private fun updateEditorPreview() {
-        val src = baseBitmap ?: return
-        val b = (seekBrightness.progress - 100).toFloat()
-        val c = seekContrast.progress / 100f
-        val s = seekSharpen.progress / 100f
-        val d = seekDenoise.progress / 100f
-        bgExecutor.execute {
-            var res = adjustColors(src, b, c, 1.08f)
-            if (d > 0.05f) res = edgeDenoise(res, d)
-            if (s > 0.05f) res = sharpen(res, s)
-            editedBitmap = res
-            runOnUiThread {
-                ivEditorPreview.setImageBitmap(res)
-                tvResInfo.text = "LIQUID AI • ${res.width} x ${res.height} px"
-            }
+    private fun updateEd() {
+        val src = baseBmp ?: return
+        val b = (sbB.progress - 100).toFloat(); val c = sbC.progress / 100f
+        val s = sbS.progress / 100f; val d = sbD.progress / 100f
+        exec.execute {
+            var r = color(src, b, c, 1.08f)
+            if (d > 0.05f) r = denoise(r, d)
+            if (s > 0.05f) r = sharp(r, s)
+            edBmp = r
+            runOnUiThread { ivEd.setImageBitmap(r); tvStatus.text = "LIQUID GLASS AI • ${r.width} x ${r.height} px" }
         }
     }
 
-    private fun runAiUpscaler() {
-        val src = editedBitmap ?: return
-        progressOverlay.visibility = View.VISIBLE
-        bgExecutor.execute {
+    private fun upscale2x() {
+        val src = edBmp ?: return
+        prog.visibility = View.VISIBLE
+        Toast.makeText(this, "Running 6-Pass Deep AI Super-Res...", Toast.LENGTH_SHORT).show()
+        exec.execute {
             val w = min(src.width * 2, 4096); val h = min(src.height * 2, 4096)
-            val clean = edgeDenoise(src, 0.45f)
-            val mid = Bitmap.createScaledBitmap(clean, (src.width + w) / 2, (src.height + h) / 2, true)
-            val scaled = Bitmap.createScaledBitmap(mid, w, h, true)
-            val finalBmp = adjustColors(sharpen(scaled, 0.82f), 3f, 1.06f, 1.1f)
-            baseBitmap = finalBmp; editedBitmap = finalBmp
-            runOnUiThread {
-                progressOverlay.visibility = View.GONE
-                showEditor()
-                Toast.makeText(this, "AI Super-Res 2x Complete!", Toast.LENGTH_SHORT).show()
-            }
+            var b = denoise(src, 0.6f)
+            b = denoise(b, 0.45f)
+            b = Bitmap.createScaledBitmap(b, (src.width + w) / 2, (src.height + h) / 2, true)
+            b = sharp(b, 0.55f)
+            b = Bitmap.createScaledBitmap(b, w, h, true)
+            b = denoise(b, 0.35f)
+            b = sharp(b, 0.85f)
+            b = color(sharp(b, 0.4f), 4f, 1.08f, 1.12f)
+            baseBmp = b; edBmp = b
+            runOnUiThread { prog.visibility = View.GONE; showEd(); Toast.makeText(this, "6-Pass AI 2x Complete!", Toast.LENGTH_SHORT).show() }
         }
     }
 
-    private fun cropZoom(src: Bitmap, factor: Float): Bitmap {
-        if (factor <= 1.02f) return src
-        val cw = max(64, (src.width / factor).roundToInt())
-        val ch = max(64, (src.height / factor).roundToInt())
-        val crop = Bitmap.createBitmap(src, (src.width - cw) / 2, (src.height - ch) / 2, cw, ch)
-        return Bitmap.createScaledBitmap(crop, src.width, src.height, true)
+    private fun crop(s: Bitmap, f: Float): Bitmap {
+        if (f <= 1.02f) return s
+        val cw = max(64, (s.width / f).roundToInt()); val ch = max(64, (s.height / f).roundToInt())
+        return Bitmap.createScaledBitmap(Bitmap.createBitmap(s, (s.width - cw) / 2, (s.height - ch) / 2, cw, ch), s.width, s.height, true)
     }
 
-    private fun adjustColors(src: Bitmap, b: Float, c: Float, sat: Float): Bitmap {
-        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+    private fun color(s: Bitmap, b: Float, c: Float, sat: Float): Bitmap {
+        val out = Bitmap.createBitmap(s.width, s.height, Bitmap.Config.ARGB_8888)
         val t = (-0.5f * c + 0.5f) * 255f + b
         val cm = ColorMatrix(floatArrayOf(c, 0f, 0f, 0f, t, 0f, c, 0f, 0f, t, 0f, 0f, c, 0f, t, 0f, 0f, 0f, 1f, 0f))
         cm.postConcat(ColorMatrix().apply { setSaturation(sat) })
-        Canvas(out).drawBitmap(src, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(cm) })
+        Canvas(out).drawBitmap(s, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(cm) })
         return out
     }
 
-    private fun edgeDenoise(src: Bitmap, str: Float): Bitmap {
-        val w = src.width; val h = src.height
-        val pix = IntArray(w * h); val out = pix.clone()
-        src.getPixels(pix, 0, w, 0, 0, w, h)
-        val thr = (18 + str * 42).toInt(); val bl = str.coerceIn(0.05f, 0.85f)
+    private fun denoise(s: Bitmap, str: Float): Bitmap {
+        val w = s.width; val h = s.height; val p = IntArray(w * h); val out = p.clone()
+        s.getPixels(p, 0, w, 0, 0, w, h)
+        val thr = (20 + str * 48).toInt(); val bl = str.coerceIn(0.05f, 0.88f)
         for (y in 1 until h - 1) {
-            val row = y * w
+            val r = y * w
             for (x in 1 until w - 1) {
-                val i = row + x; val c = pix[i]
-                val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
+                val i = r + x; val c = p[i]; val cr = c shr 16 and 0xFF; val cg = c shr 8 and 0xFF; val cb = c and 0xFF
                 var sr = cr; var sg = cg; var sb = cb; var cnt = 1
-                val nb = intArrayOf(pix[i - 1], pix[i + 1], pix[i - w], pix[i + w])
+                val nb = intArrayOf(p[i - 1], p[i + 1], p[i - w], p[i + w], p[i - w - 1], p[i - w + 1], p[i + w - 1], p[i + w + 1])
                 for (n in nb) {
                     val nr = n shr 16 and 0xFF; val ng = n shr 8 and 0xFF; val nbl = n and 0xFF
                     if (abs(cr - nr) + abs(cg - ng) + abs(cb - nbl) < thr) { sr += nr; sg += ng; sb += nbl; cnt++ }
@@ -376,36 +299,38 @@ class MainActivity : AppCompatActivity() {
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
     }
 
-    private fun sharpen(src: Bitmap, amt: Float): Bitmap {
-        val w = src.width; val h = src.height
-        val pix = IntArray(w * h); val out = pix.clone()
-        src.getPixels(pix, 0, w, 0, 0, w, h)
+    private fun sharp(s: Bitmap, amt: Float): Bitmap {
+        val w = s.width; val h = s.height; val p = IntArray(w * h); val out = p.clone()
+        s.getPixels(p, 0, w, 0, 0, w, h)
         val cw = 1f + 4f * amt; val nw = -amt
         for (y in 1 until h - 1) {
-            val row = y * w
+            val r = y * w
             for (x in 1 until w - 1) {
-                val i = row + x; val c = pix[i]; val t = pix[i - w]; val b = pix[i + w]; val l = pix[i - 1]; val r = pix[i + 1]
+                val i = r + x; val c = p[i]; val t = p[i - w]; val b = p[i + w]; val l = p[i - 1]; val rt = p[i + 1]
                 val cr = c shr 16 and 0xFF; val tr = t shr 16 and 0xFF
-                if (abs(cr - tr) < 4) continue
-                val red = ((cr * cw) + (tr + (b shr 16 and 0xFF) + (l shr 16 and 0xFF) + (r shr 16 and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
-                val grn = (((c shr 8 and 0xFF) * cw) + ((t shr 8 and 0xFF) + (b shr 8 and 0xFF) + (l shr 8 and 0xFF) + (r shr 8 and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
-                val blu = (((c and 0xFF) * cw) + ((t and 0xFF) + (b and 0xFF) + (l and 0xFF) + (r and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
+                if (abs(cr - tr) < 3) continue
+                val red = ((cr * cw) + (tr + (b shr 16 and 0xFF) + (l shr 16 and 0xFF) + (rt shr 16 and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
+                val grn = (((c shr 8 and 0xFF) * cw) + ((t shr 8 and 0xFF) + (b shr 8 and 0xFF) + (l shr 8 and 0xFF) + (rt shr 8 and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
+                val blu = (((c and 0xFF) * cw) + ((t and 0xFF) + (b and 0xFF) + (l and 0xFF) + (rt and 0xFF)) * nw).roundToInt().coerceIn(0, 255)
                 out[i] = (0xFF shl 24) or (red shl 16) or (grn shl 8) or blu
             }
         }
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
     }
 
-    private fun saveToGallery() {
-        val bmp = editedBitmap ?: return
-        progressOverlay.visibility = View.VISIBLE
-        bgExecutor.execute {
+    private fun saveImg() {
+        val b = edBmp ?: return
+        prog.visibility = View.VISIBLE
+        exec.execute {
             val cv = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, "XiaomiAI_${System.currentTimeMillis()}.jpg")
                 put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/XiaomiAICam")
-                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/XiaomiAICam")
             }
-            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)
-            uri?.let { contentResolver.openOutputStream(it)?.use { s -> bmp.compress(Bitmap.Compr
+            contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let {
+                contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) }
+            }
+            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Saved to Gallery!", Toast.LENGTH_LONG).show() }
+        }
+    }
+}
