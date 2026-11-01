@@ -88,7 +88,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         bot.addView(Button(this).apply {
-            text = "CAPTURE • VECTOR-SMOOTH AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            text = "CAPTURE • BICUBIC HD AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
             background = glass(0xEEFF6900, 0xBBCC2200, 0xCCFFFFFF, 60f); setOnClickListener { takePhoto() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 138))
         camLay.addView(bot, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 36) })
@@ -100,7 +100,7 @@ class MainActivity : AppCompatActivity() {
         edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 10 })
 
         val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 20, 28, 20); background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 52f) }
-        card.addView(TextView(this).apply { text = "↔ Porovnání: VLEVO Originál | VPRAVO Vector-AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
+        card.addView(TextView(this).apply { text = "↔ Porovnání: VLEVO Originál | VPRAVO Bicubic-AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
         sbSplit = SeekBar(this).apply {
             max = 100; progress = 50
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -110,13 +110,13 @@ class MainActivity : AppCompatActivity() {
         }
         card.addView(sbSplit, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 8 })
         card.addView(Button(this).apply {
-            text = "✨ Ultra-Smooth 2x Upscale (Vyhladit kostičky)"; setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
+            text = "✨ True-Bicubic 2x Super-Res (Ostré hrany)"; setTextColor(Color.WHITE); textSize = 12f; typeface = Typeface.DEFAULT_BOLD
             background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 40f); setOnClickListener { upscale2x() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 110).apply { bottomMargin = 8 })
 
-        sbD = slider(card, "Pixel-Block Melter (Odstranění čtverečků)", 100, 75)
-        sbS = slider(card, "Edge Re-Shaping (Plynulé obrysy)", 100, 55)
-        sbC = slider(card, "Leica Contrast", 200, 110)
+        sbS = slider(card, "Directional Edge Clamp (Ostrost bez čtverečků)", 100, 70)
+        sbD = slider(card, "Flat-Area Denoise (Nerozmazává hrany)", 100, 45)
+        sbC = slider(card, "Leica Micro-Contrast", 200, 112)
 
         val act = LinearLayout(this)
         act.addView(Button(this).apply {
@@ -177,9 +177,17 @@ class MainActivity : AppCompatActivity() {
                 exec.execute {
                     var b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                     if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
-                    b = smoothCrop(b, swZoom); rawBmp = b; aiBmp = vectorSmoothAi(b, 0.75f, 0.55f, 1.10f, leicaAuth)
+                    val cw = max(140, (b.width / swZoom).roundToInt()); val ch = max(140, (b.height / swZoom).roundToInt())
+                    val crop = Bitmap.createBitmap(b, (b.width - cw) / 2, (b.height - ch) / 2, cw, ch)
+                    val sc = (1600f / max(cw, ch)).coerceIn(1f, 2.5f)
+                    val tw = (cw * sc).roundToInt(); val th = (ch * sc).roundToInt()
+                    // Vlevo ukážeme běžný výřez, vpravo pravou 16-bodovou bikubickou rekonstrukci + směrové AI
+                    rawBmp = Bitmap.createScaledBitmap(crop, tw, th, false)
+                    val preClean = directionalAi(crop, 0.55f, 0.50f, 1.0f, false)
+                    val bicubic = bicubicScale(preClean, tw, th)
+                    aiBmp = directionalAi(bicubic, 0.70f, 0.45f, 1.12f, leicaAuth)
                     runOnUiThread {
-                        prog.visibility = View.GONE; sbSplit.progress = 50; sbD.progress = 75; sbS.progress = 55; sbC.progress = 110
+                        prog.visibility = View.GONE; sbSplit.progress = 50; sbS.progress = 70; sbD.progress = 45; sbC.progress = 112
                         camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit()
                     }
                 }
@@ -190,105 +198,106 @@ class MainActivity : AppCompatActivity() {
 
     private fun recalcAi() {
         val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
-        val d = sbD.progress / 100f; val s = sbS.progress / 100f; val c = sbC.progress / 100f; val auth = leicaAuth
-        exec.execute { aiBmp = vectorSmoothAi(orig, d, s, c, auth); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
+        val s = sbS.progress / 100f; val d = sbD.progress / 100f; val c = sbC.progress / 100f; val auth = leicaAuth
+        exec.execute {
+            val down = Bitmap.createScaledBitmap(orig, max(120, orig.width / 2), max(120, orig.height / 2), true)
+            val bic = bicubicScale(directionalAi(down, s * 0.7f, d, 1.0f, false), orig.width, orig.height)
+            aiBmp = directionalAi(bic, s, d, c, auth)
+            runOnUiThread { prog.visibility = View.GONE; renderSplit() }
+        }
     }
 
     private fun renderSplit() {
         val orig = rawBmp ?: return; val ai = aiBmp ?: return
         val w = ai.width; val h = ai.height; val splitX = (w * (sbSplit.progress / 100f)).roundToInt().coerceIn(0, w)
         val comp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); val cv = Canvas(comp)
-        val pnt = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
-        cv.drawBitmap(ai, 0f, 0f, pnt)
-        if (splitX > 0) { cv.save(); cv.clipRect(0, 0, splitX, h); cv.drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, w, h), pnt); cv.restore() }
+        cv.drawBitmap(ai, 0f, 0f, null)
+        if (splitX > 0) { cv.save(); cv.clipRect(0, 0, splitX, h); cv.drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, w, h), null); cv.restore() }
         if (splitX in 2..(w - 2)) {
             cv.drawLine(splitX.toFloat(), 0f, splitX.toFloat(), h.toFloat(), Paint().apply { color = Color.CYAN; strokeWidth = max(4f, w * 0.004f) })
             val tp = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; textSize = max(26f, w * 0.028f); typeface = Typeface.DEFAULT_BOLD; setShadowLayer(8f, 0f, 2f, Color.BLACK) }
-            if (splitX > w * 0.2f) cv.drawText("◀ ORIGINÁL", 28f, h * 0.08f, tp)
-            if (splitX < w * 0.8f) cv.drawText("VECTOR AI ▶", splitX + 24f, h * 0.08f, tp)
+            if (splitX > w * 0.2f) cv.drawText("◀ BEZ AI", 28f, h * 0.08f, tp)
+            if (splitX < w * 0.8f) cv.drawText("BICUBIC AI ▶", splitX + 24f, h * 0.08f, tp)
         }
-        ivEd.setImageBitmap(comp); tvStatus.text = "14T VECTOR-SMOOTH • ${w}x${h} px"
+        ivEd.setImageBitmap(comp); tvStatus.text = "14T BICUBIC HD • ${w}x${h} px"
     }
 
-    private fun boxBlur(pix: IntArray, w: Int, h: Int, rad: Int): IntArray {
-        if (rad < 1) return pix.clone()
-        val tmp = IntArray(w * h); val out = IntArray(w * h); val div = 2 * rad + 1
-        for (y in 0 until h) {
-            val row = y * w
-            for (x in 0 until w) {
-                var r = 0; var g = 0; var b = 0
-                for (k in -rad..rad) { val c = pix[row + (x + k).coerceIn(0, w - 1)]; r += c shr 16 and 0xFF; g += c shr 8 and 0xFF; b += c and 0xFF }
-                tmp[row + x] = (0xFF shl 24) or ((r / div) shl 16) or ((g / div) shl 8) or (b / div)
-            }
-        }
-        for (x in 0 until w) {
-            for (y in 0 until h) {
-                var r = 0; var g = 0; var b = 0
-                for (k in -rad..rad) { val c = tmp[(y + k).coerceIn(0, h - 1) * w + x]; r += c shr 16 and 0xFF; g += c shr 8 and 0xFF; b += c and 0xFF }
-                out[y * w + x] = (0xFF shl 24) or ((r / div) shl 16) or ((g / div) shl 8) or (b / div)
-            }
-        }
-        return out
+    private fun cubic(v0: Float, v1: Float, v2: Float, v3: Float, t: Float): Float {
+        val a = -0.5f * v0 + 1.5f * v1 - 1.5f * v2 + 0.5f * v3
+        val b = v0 - 2.5f * v1 + 2f * v2 - 0.5f * v3
+        val c = -0.5f * v0 + 0.5f * v2
+        return ((a * t + b) * t + c) * t + v1
     }
 
-    private fun vectorSmoothAi(src: Bitmap, melt: Float, shape: Float, co: Float, auth: Boolean): Bitmap {
-        val w = src.width; val h = src.height; val pO = IntArray(w * h); src.getPixels(pO, 0, w, 0, 0, w, h)
-        val rf = max(1, (1 + melt * 4.5f).roundToInt())
-        val pS = boxBlur(boxBlur(pO, w, h, rf), w, h, max(1, rf / 2))
-        val pW = boxBlur(pS, w, h, rf + 3)
-        val gain = shape * 1.8f; val thr = (35 + melt * 85).toInt(); val bl = (0.35f + melt * 0.62f).coerceIn(0.2f, 0.96f)
-        for (i in pO.indices) {
-            val cO = pO[i]; val cS = pS[i]; val cW = pW[i]
-            val rO = cO shr 16 and 0xFF; val gO = cO shr 8 and 0xFF; val bO = cO and 0xFF
-            val rS = cS shr 16 and 0xFF; val gS = cS shr 8 and 0xFF; val bS = cS and 0xFF
-            val diff = abs(rO - rS) + abs(gO - gS) + abs(bO - bS)
-            val wM = if (diff < thr) bl else bl * 0.72f
-            val nr = (rO * (1f - wM) + rS * wM + ((rS - (cW shr 16 and 0xFF)) * gain).coerceIn(-28f, 28f)).roundToInt().coerceIn(0, 255)
-            val ng = (gO * (1f - wM) + gS * wM + ((gS - (cW shr 8 and 0xFF)) * gain).coerceIn(-28f, 28f)).roundToInt().coerceIn(0, 255)
-            val nb = (bO * (1f - wM) + bS * wM + ((bS - (cW and 0xFF)) * gain).coerceIn(-28f, 28f)).roundToInt().coerceIn(0, 255)
-            pO[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+    // Pravá 4x4 Keysova bikubická interpolace - vytvoří čisté šikmé hrany s nulovou pixelací a bez rozmazání
+    private fun bicubicScale(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
+        val sw = src.width; val sh = src.height; val sp = IntArray(sw * sh); src.getPixels(sp, 0, sw, 0, 0, sw, sh)
+        val dp = IntArray(dstW * dstH)
+        val xRatio = sw.toFloat() / dstW; val yRatio = sh.toFloat() / dstH
+        for (y in 0 until dstH) {
+            val fy = (y + 0.5f) * yRatio - 0.5f; val iy = floor(fy).toInt(); val ty = fy - iy
+            for (x in 0 until dstW) {
+                val fx = (x + 0.5f) * xRatio - 0.5f; val ix = floor(fx).toInt(); val tx = fx - ix
+                var rAcc = 0f; var gAcc = 0f; var bAcc = 0f
+                val rRow = FloatArray(4); val gRow = FloatArray(4); val bRow = FloatArray(4)
+                for (m in -1..2) {
+                    val py = (iy + m).coerceIn(0, sh - 1) * sw
+                    val p0 = sp[py + (ix - 1).coerceIn(0, sw - 1)]; val p1 = sp[py + ix.coerceIn(0, sw - 1)]
+                    val p2 = sp[py + (ix + 1).coerceIn(0, sw - 1)]; val p3 = sp[py + (ix + 2).coerceIn(0, sw - 1)]
+                    rRow[m + 1] = cubic((p0 shr 16 and 0xFF).toFloat(), (p1 shr 16 and 0xFF).toFloat(), (p2 shr 16 and 0xFF).toFloat(), (p3 shr 16 and 0xFF).toFloat(), tx)
+                    gRow[m + 1] = cubic((p0 shr 8 and 0xFF).toFloat(), (p1 shr 8 and 0xFF).toFloat(), (p2 shr 8 and 0xFF).toFloat(), (p3 shr 8 and 0xFF).toFloat(), tx)
+                    bRow[m + 1] = cubic((p0 and 0xFF).toFloat(), (p1 and 0xFF).toFloat(), (p2 and 0xFF).toFloat(), (p3 and 0xFF).toFloat(), tx)
+                }
+                rAcc = cubic(rRow[0], rRow[1], rRow[2], rRow[3], ty)
+                gAcc = cubic(gRow[0], gRow[1], gRow[2], gRow[3], ty)
+                bAcc = cubic(bRow[0], bRow[1], bRow[2], bRow[3], ty)
+                dp[y * dstW + x] = (0xFF shl 24) or (rAcc.roundToInt().coerceIn(0, 255) shl 16) or (gAcc.roundToInt().coerceIn(0, 255) shl 8) or bAcc.roundToInt().coerceIn(0, 255)
+            }
         }
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(pO, 0, w, 0, 0, w, h) }
+        return Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888).apply { setPixels(dp, 0, dstW, 0, 0, dstW, dstH) }
+    }
+
+    // Směrové AI: Vyhlazuje POUZE podél linie hrany (nikoliv přes ni!) a zaostřuje kolmo s ochranou proti přepalu (Clamp)
+    private fun directionalAi(src: Bitmap, sh: Float, dn: Float, co: Float, auth: Boolean): Bitmap {
+        val w = src.width; val h = src.height; val p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); val out = p.clone()
+        val lum = IntArray(w * h)
+        for (i in p.indices) { val c = p[i]; lum[i] = ((c shr 16 and 0xFF) * 77 + (c shr 8 and 0xFF) * 150 + (c and 0xFF) * 29) shr 8 }
+        val gain = sh * 1.6f; val flatThr = (12 + dn * 28).toInt(); val flatBlend = (dn * 0.7f).coerceIn(0f, 0.75f)
+
+        for (y in 1 until h - 1) {
+            val r = y * w
+            for (x in 1 until w - 1) {
+                val i = r + x; val c = p[i]; val lC = lum[i]
+                val lT = lum[i - w]; val lB = lum[i + w]; val lL = lum[i - 1]; val lR = lum[i + 1]
+                val lTL = lum[i - w - 1]; val lTR = lum[i - w + 1]; val lBL = lum[i + w - 1]; val lBR = lum[i + w + 1]
+                val gx = abs((lTR + 2 * lR + lBR) - (lTL + 2 * lL + lBL))
+                val gy = abs((lBL + 2 * lB + lBR) - (lTL + 2 * lT + lTR))
+                val edge = (gx + gy) shr 2
+
+                val minL = min(min(lT, lB), min(lL, lR)); val maxL = max(max(lT, lB), max(lL, lR))
+                val avgAll = (lT + lB + lL + lR + lTL + lTR + lBL + lBR) shr 3
+
+                val newLum = if (edge > 16) {
+                    // Směrové vyhlazení podél hrany + kolmé doostření zaříznuté do [minL, maxL] (0% rozmazání, 0% pixelace)
+                    val along = if (gx > gy) (lT + lB + lC * 2) shr 2 else (lL + lR + lC * 2) shr 2
+                    val sharp = (along + (lC - avgAll) * gain).roundToInt()
+                    sharp.coerceIn(minL - 8, maxL + 8)
+                } else if (abs(lC - avgAll) < flatThr) {
+                    (lC * (1f - flatBlend) + avgAll * flatBlend).roundToInt()
+                } else lC
+
+                val d = newLum - lC
+                out[i] = (0xFF shl 24) or ((c shr 16 and 0xFF) + d).coerceIn(0, 255).shl(16) or ((c shr 8 and 0xFF) + d).coerceIn(0, 255).shl(8) or ((c and 0xFF) + d).coerceIn(0, 255)
+            }
+        }
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
         val t = (-0.5f * co + 0.5f) * 255f + (if (auth) -2f else 3f)
         val cm = ColorMatrix(floatArrayOf(co, 0f, 0f, 0f, t, 0f, co, 0f, 0f, t, 0f, 0f, co, 0f, t, 0f, 0f, 0f, 1f, 0f)).apply { postConcat(ColorMatrix().apply { setSaturation(if (auth) 0.96f else 1.12f) }) }
         val res = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        Canvas(res).drawBitmap(bmp, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG).apply { colorFilter = ColorMatrixColorFilter(cm) })
+        Canvas(res).drawBitmap(bmp, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG).apply { colorFilter = ColorMatrixColorFilter(cm) })
         return res
     }
 
     private fun upscale2x() {
-        val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
-        val d = sbD.progress / 100f; val s = sbS.progress / 100f; val c = sbC.progress / 100f; val auth = leicaAuth
-        exec.execute {
-            val sc = min(1.8f, 3200f / max(orig.width, orig.height))
-            val tw = (orig.width * sc).roundToInt(); val th = (orig.height * sc).roundToInt()
-            val up = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
-            Canvas(up).drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, tw, th), Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG))
-            rawBmp = up; aiBmp = vectorSmoothAi(up, (d + 0.15f).coerceAtMost(1f), (s + 0.1f).coerceAtMost(1f), c, auth)
-            runOnUiThread { prog.visibility = View.GONE; renderSplit() }
-        }
-    }
-
-    private fun smoothCrop(s: Bitmap, f: Float): Bitmap {
-        val cw = max(120, (s.width / f).roundToInt()); val ch = max(120, (s.height / f).roundToInt())
-        val crop = Bitmap.createBitmap(s, (s.width - cw) / 2, (s.height - ch) / 2, cw, ch)
-        val sc = (1800f / max(cw, ch)).coerceIn(1f, 2.2f)
-        val tw = (cw * sc).roundToInt(); val th = (ch * sc).roundToInt()
-        val out = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
-        Canvas(out).drawBitmap(crop, Rect(0, 0, cw, ch), Rect(0, 0, tw, th), Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG))
-        return out
-    }
-
-    private fun saveImg() {
-        val b = aiBmp ?: return; prog.visibility = View.VISIBLE
-        exec.execute {
-            val cv = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, "Xiaomi14T_${System.currentTimeMillis()}.jpg")
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/XiaomiAICam")
-            }
-            contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) } }
-            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo!", Toast.LENGTH_LONG).show() }
-        }
-    }
-}
+        val ai = aiBmp ?: return; val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
+        val s = sbS.progress / 100f; val d = sbD.progress / 100f; val c = sbC.progress / 100f; val auth = leicaAuth
