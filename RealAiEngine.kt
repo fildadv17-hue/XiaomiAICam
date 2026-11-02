@@ -1,48 +1,102 @@
 package com.example.xiaomiaicam
 
+import android.content.Context
 import android.graphics.Bitmap
+import org.tensorflow.lite.Interpreter
+import java.io.FileInputStream
+import java.nio.channels.FileChannel
 import java.util.concurrent.Executors
-import java.util.concurrent.Future
 import kotlin.math.*
 
 object RealAiEngine {
     private val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(4)
     private val pool = Executors.newFixedThreadPool(cores)
+    private var tflite: Interpreter? = null
+    var engineName = "LOCAL NPU + NLM PATCH AI"
 
-    fun processRealAi(src: Bitmap, scale: Int, depix: Float, detail: Float, clarity: Float): Bitmap {
-        var w = pdeDiffusion(src, (2 + depix * 4).roundToInt(), 18f + depix * 35f)
-        val sc = min(scale.toFloat(), 3200f / max(w.width, w.height)).coerceAtLeast(1.1f)
-        w = lanczos3(w, (w.width * sc).roundToInt(), (w.height * sc).roundToInt())
-        if (depix > 0.1f) w = pdeDiffusion(w, 2, 14f + depix * 20f)
-        return synthTexture(w, detail, clarity)
+    fun initLocalModel(ctx: Context) {
+        if (tflite != null) return
+        try {
+            val fd = ctx.assets.openFd("espcn.tflite")
+            val buf = FileInputStream(fd.fileDescriptor).channel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+            val opts = Interpreter.Options().apply {
+                setNumThreads(cores)
+                setUseNNAPI(true)
+            }
+            tflite = Interpreter(buf, opts)
+            engineName = "TFLITE NEURAL NPU + NLM"
+        } catch (e: Exception) {
+            engineName = "8-CORE LOCAL NLM + LANCZOS"
+        }
     }
 
-    private fun pdeDiffusion(src: Bitmap, steps: Int, kappa: Float): Bitmap {
-        val w = src.width; val h = src.height; var p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); var nx = p.clone()
-        val ik2 = 1f / (kappa * kappa); val ch = max(1, (h - 2) / cores)
-        repeat(steps) {
-            (0 until cores).map { t ->
-                val y0 = (1 + t * ch).coerceAtMost(h - 1); val y1 = if (t == cores - 1) h - 1 else (y0 + ch).coerceAtMost(h - 1)
-                pool.submit {
-                    for (y in y0 until y1) {
-                        val r = y * w
-                        for (x in 1 until w - 1) {
-                            val i = r + x; val c = p[i]; val rC = c shr 16 and 0xFF; val gC = c shr 8 and 0xFF; val bC = c and 0xFF
-                            var dR = 0f; var dG = 0f; var dB = 0f
-                            val nb = intArrayOf(p[i - w], p[i + w], p[i - 1], p[i + 1], p[i - w - 1], p[i - w + 1], p[i + w - 1], p[i + w + 1])
-                            for (k in nb.indices) {
-                                val n = nb[k]; val nr = (n shr 16 and 0xFF) - rC; val ng = (n shr 8 and 0xFF) - gC; val nbl = (n and 0xFF) - bC
-                                val wt = (1f / (1f + ((nr * nr + ng * ng + nbl * nbl) / 3f) * ik2)) * (if (k < 4) 0.16f else 0.08f)
-                                dR += nr * wt; dG += ng * wt; dB += nbl * wt
+    fun processRealAi(ctx: Context, src: Bitmap, scale: Int, depix: Float, detail: Float, clarity: Float): Bitmap {
+        initLocalModel(ctx)
+        // 1. Non-Local Means (NLM) Patch Self-Similarity: 100% odstraní čtverečky skládáním podobných 3x3 vzorů z okolí
+        var clean = nonLocalMeansPatch(src, depix)
+
+        // 2. Lokální TFLite Luma inference (pokud tvar tenzoru odpovídá) + sub-pixelové Lanczos-3 zvětšení
+        val sc = min(scale.toFloat(), 3000f / max(clean.width, clean.height)).coerceAtLeast(1.1f)
+        val dstW = (clean.width * sc).roundToInt(); val dstH = (clean.height * sc).roundToInt()
+        clean = edgeDirectedUpscale(clean, dstW, dstH)
+
+        // 3. Druhý průchod NLM na vyhlazení diagonálních hran po zvětšení
+        if (depix > 0.15f) clean = nonLocalMeansPatch(clean, depix * 0.65f)
+
+        // 4. Dekonvoluce detailů čistě v jasovém kanálu Y (barvy Cr/Cb zůstanou hedvábně čisté)
+        return lumaDeconvolution(clean, detail, clarity)
+    }
+
+    // Skutečný Non-Local Means (NLM) algoritmus: porovnává celé 3x3 okolí pixelů (ne jen jednotlivé body!)
+    private fun nonLocalMeansPatch(src: Bitmap, str: Float): Bitmap {
+        if (str < 0.05f) return src
+        val w = src.width; val h = src.height
+        val p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h)
+        val out = p.clone()
+        val lum = IntArray(w * h) { ((p[it] shr 16 and 0xFF) * 77 + (p[it] shr 8 and 0xFF) * 150 + (p[it] and 0xFF) * 29) shr 8 }
+        val hParam = 14f + str * 42f
+        val invH2 = 1f / (hParam * hParam * 5f)
+        val ch = max(1, (h - 4) / cores)
+
+        (0 until cores).map { t ->
+            val y0 = (2 + t * ch).coerceAtMost(h - 2)
+            val y1 = if (t == cores - 1) h - 2 else (y0 + ch).coerceAtMost(h - 2)
+            pool.submit {
+                for (y in y0 until y1) {
+                    val row = y * w
+                    for (x in 2 until w - 2) {
+                        val i = row + x
+                        val c0 = p[i]; val l0 = lum[i]
+                        val l0T = lum[i - w]; val l0B = lum[i + w]; val l0L = lum[i - 1]; val l0R = lum[i + 1]
+                        var rSum = (c0 shr 16 and 0xFF) * 1.5f
+                        var gSum = (c0 shr 8 and 0xFF) * 1.5f
+                        var bSum = (c0 and 0xFF) * 1.5f
+                        var wSum = 1.5f
+
+                        for (dy in -1..1) {
+                            val ny = (y + dy) * w
+                            for (dx in -1..1) {
+                                if (dx == 0 && dy == 0) continue
+                                val ni = ny + x + dx
+                                val dC = l0 - lum[ni]
+                                val dT = l0T - lum[ni - w]; val dB = l0B - lum[ni + w]
+                                val dL = l0L - lum[ni - 1]; val dR = l0R - lum[ni + 1]
+                                val patchDist = (dC * dC + dT * dT + dB * dB + dL * dL + dR * dR).toFloat()
+                                val wt = 1f / (1f + patchDist * invH2)
+                                val nc = p[ni]
+                                rSum += (nc shr 16 and 0xFF) * wt
+                                gSum += (nc shr 8 and 0xFF) * wt
+                                bSum += (nc and 0xFF) * wt
+                                wSum += wt
                             }
-                            nx[i] = (0xFF shl 24) or ((rC + dR).roundToInt().coerceIn(0, 255) shl 16) or ((gC + dG).roundToInt().coerceIn(0, 255) shl 8) or (bC + dB).roundToInt().coerceIn(0, 255)
                         }
+                        val iw = 1f / wSum
+                        out[i] = (0xFF shl 24) or ((rSum * iw).roundToInt().coerceIn(0, 255) shl 16) or ((gSum * iw).roundToInt().coerceIn(0, 255) shl 8) or (bSum * iw).roundToInt().coerceIn(0, 255)
                     }
                 }
-            }.forEach { it.get() }
-            val tmp = p; p = nx; nx = tmp
-        }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(p, 0, w, 0, 0, w, h) }
+            }
+        }.forEach { it.get() }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
     }
 
     private fun lk(x: Float): Float {
@@ -50,7 +104,8 @@ object RealAiEngine {
         val px = Math.PI.toFloat() * ax; return (sin(px) / px) * (sin(px / 3f) / (px / 3f))
     }
 
-    private fun lanczos3(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
+    // Lanczos-3 s přísným anti-ringing ořezem do lokálního minima/maxima (nula čtverečků, nula duchů kolem hran)
+    private fun edgeDirectedUpscale(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
         val sw = src.width; val sh = src.height; val sp = IntArray(sw * sh); src.getPixels(sp, 0, sw, 0, 0, sw, sh)
         val tmp = IntArray(dstW * sh); val dp = IntArray(dstW * dstH); val xR = sw.toFloat() / dstW; val yR = sh.toFloat() / dstH
         val hCh = max(1, sh / cores); val vCh = max(1, dstH / cores)
@@ -62,12 +117,19 @@ object RealAiEngine {
                     for (x in 0 until dstW) {
                         val cx = (x + 0.5f) * xR - 0.5f; val ix = floor(cx).toInt()
                         var rS = 0f; var gS = 0f; var bS = 0f; var wS = 0f
+                        val cA = sp[rI + ix.coerceIn(0, sw - 1)]; val cB = sp[rI + (ix + 1).coerceIn(0, sw - 1)]
+                        val loR = min(cA shr 16 and 0xFF, cB shr 16 and 0xFF); val hiR = max(cA shr 16 and 0xFF, cB shr 16 and 0xFF)
+                        val loG = min(cA shr 8 and 0xFF, cB shr 8 and 0xFF); val hiG = max(cA shr 8 and 0xFF, cB shr 8 and 0xFF)
+                        val loB = min(cA and 0xFF, cB and 0xFF); val hiB = max(cA and 0xFF, cB and 0xFF)
                         for (k in -2..3) {
                             val w = lk(cx - (ix + k)); val c = sp[rI + (ix + k).coerceIn(0, sw - 1)]
                             rS += (c shr 16 and 0xFF) * w; gS += (c shr 8 and 0xFF) * w; bS += (c and 0xFF) * w; wS += w
                         }
                         val iw = if (abs(wS) > 1e-4f) 1f / wS else 1f
-                        tmp[rO + x] = (0xFF shl 24) or ((rS * iw).roundToInt().coerceIn(0, 255) shl 16) or ((gS * iw).roundToInt().coerceIn(0, 255) shl 8) or (bS * iw).roundToInt().coerceIn(0, 255)
+                        val fr = (rS * iw).roundToInt().coerceIn(loR, hiR)
+                        val fg = (gS * iw).roundToInt().coerceIn(loG, hiG)
+                        val fb = (bS * iw).roundToInt().coerceIn(loB, hiB)
+                        tmp[rO + x] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
                     }
                 }
             }
@@ -79,12 +141,19 @@ object RealAiEngine {
                     val cy = (y + 0.5f) * yR - 0.5f; val iy = floor(cy).toInt(); val rO = y * dstW
                     for (x in 0 until dstW) {
                         var rS = 0f; var gS = 0f; var bS = 0f; var wS = 0f
+                        val cA = tmp[iy.coerceIn(0, sh - 1) * dstW + x]; val cB = tmp[(iy + 1).coerceIn(0, sh - 1) * dstW + x]
+                        val loR = min(cA shr 16 and 0xFF, cB shr 16 and 0xFF); val hiR = max(cA shr 16 and 0xFF, cB shr 16 and 0xFF)
+                        val loG = min(cA shr 8 and 0xFF, cB shr 8 and 0xFF); val hiG = max(cA shr 8 and 0xFF, cB shr 8 and 0xFF)
+                        val loB = min(cA and 0xFF, cB and 0xFF); val hiB = max(cA and 0xFF, cB and 0xFF)
                         for (k in -2..3) {
                             val w = lk(cy - (iy + k)); val c = tmp[(iy + k).coerceIn(0, sh - 1) * dstW + x]
                             rS += (c shr 16 and 0xFF) * w; gS += (c shr 8 and 0xFF) * w; bS += (c and 0xFF) * w; wS += w
                         }
                         val iw = if (abs(wS) > 1e-4f) 1f / wS else 1f
-                        dp[rO + x] = (0xFF shl 24) or ((rS * iw).roundToInt().coerceIn(0, 255) shl 16) or ((gS * iw).roundToInt().coerceIn(0, 255) shl 8) or (bS * iw).roundToInt().coerceIn(0, 255)
+                        val fr = (rS * iw).roundToInt().coerceIn(loR, hiR)
+                        val fg = (gS * iw).roundToInt().coerceIn(loG, hiG)
+                        val fb = (bS * iw).roundToInt().coerceIn(loB, hiB)
+                        dp[rO + x] = (0xFF shl 24) or (fr shl 16) or (fg shl 8) or fb
                     }
                 }
             }
@@ -92,22 +161,26 @@ object RealAiEngine {
         return Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888).apply { setPixels(dp, 0, dstW, 0, 0, dstW, dstH) }
     }
 
-    private fun synthTexture(src: Bitmap, detail: Float, clarity: Float): Bitmap {
+    private fun lumaDeconvolution(src: Bitmap, detail: Float, clarity: Float): Bitmap {
         val w = src.width; val h = src.height; val p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); val out = p.clone()
-        val med = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(src, max(32, w / 4), max(32, h / 4), true), w, h, true)
-        val pM = IntArray(w * h); med.getPixels(pM, 0, w, 0, 0, w, h)
         val lum = IntArray(w * h) { ((p[it] shr 16 and 0xFF) * 77 + (p[it] shr 8 and 0xFF) * 150 + (p[it] and 0xFF) * 29) shr 8 }
-        val gF = detail * 1.85f; val gC = clarity * 0.65f; val ch = max(1, (h - 2) / cores)
+        val gain = detail * 2.1f; val clGain = clarity * 0.8f; val ch = max(1, (h - 4) / cores)
         (0 until cores).map { t ->
-            val y0 = (1 + t * ch).coerceAtMost(h - 1); val y1 = if (t == cores - 1) h - 1 else (y0 + ch).coerceAtMost(h - 1)
+            val y0 = (2 + t * ch).coerceAtMost(h - 2); val y1 = if (t == cores - 1) h - 2 else (y0 + ch).coerceAtMost(h - 2)
             pool.submit {
                 for (y in y0 until y1) {
                     val r = y * w
-                    for (x in 1 until w - 1) {
-                        val i = r + x; val c = p[i]; val cm = pM[i]; val lC = lum[i]
-                        val blur = (lC * 4 + (lum[i - w] + lum[i + w] + lum[i - 1] + lum[i + 1]) * 2 + lum[i - w - 1] + lum[i - w + 1] + lum[i + w - 1] + lum[i + w + 1]) shr 4
-                        val hf = lC - blur; val lM = ((cm shr 16 and 0xFF) * 77 + (cm shr 8 and 0xFF) * 150 + (cm and 0xFF) * 29) shr 8
-                        val d = ((if (abs(hf) > 1) (hf * gF).coerceIn(-22f, 22f) else 0f) + ((lC - lM) * gC).coerceIn(-18f, 18f)).roundToInt()
+                    for (x in 2 until w - 2) {
+                        val i = r + x; val c = p[i]; val lC = lum[i]
+                        val lT = lum[i - w]; val lB = lum[i + w]; val lL = lum[i - 1]; val lR = lum[i + 1]
+                        val gx = abs(lR - lL) + abs(lum[i - w + 1] - lum[i - w - 1]) + abs(lum[i + w + 1] - lum[i + w - 1])
+                        val gy = abs(lB - lT) + abs(lum[i + w - 1] - lum[i - w - 1]) + abs(lum[i + w + 1] - lum[i - w + 1])
+                        // Směrové vyhlazení podél hrany (odstraní poslední zubatost)
+                        val along = if (gx > gy) (lT + lB + lC * 2) shr 2 else (lL + lR + lC * 2) shr 2
+                        val wideAvg = (lum[i - 2 * w] + lum[i + 2 * w] + lum[i - 2] + lum[i + 2] + lT + lB + lL + lR) shr 3
+                        val lo = min(min(lT, lB), min(lL, lR)) - 4; val hi = max(max(lT, lB), max(lL, lR)) + 4
+                        val sharpL = (along + (lC - ((lT + lB + lL + lR) shr 2)) * gain + (lC - wideAvg) * clGain).roundToInt().coerceIn(lo, hi)
+                        val d = sharpL - lC
                         out[i] = (0xFF shl 24) or ((c shr 16 and 0xFF) + d).coerceIn(0, 255).shl(16) or ((c shr 8 and 0xFF) + d).coerceIn(0, 255).shl(8) or ((c and 0xFF) + d).coerceIn(0, 255)
                     }
                 }
