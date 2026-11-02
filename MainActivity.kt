@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(s: Bundle?) {
         super.onCreate(s); buildUi()
+        RealAiEngine.initLocalModel(applicationContext)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCam()
         else perm.launch(Manifest.permission.CAMERA)
     }
@@ -43,7 +44,7 @@ class MainActivity : AppCompatActivity() {
     private fun saveImg() {
         val b = aiBmp ?: return; prog.visibility = View.VISIBLE
         exec.execute {
-            val cv = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, "14T_RealAI_${System.currentTimeMillis()}.jpg"); put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg") }
+            val cv = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, "14T_LocalAI_${System.currentTimeMillis()}.jpg"); put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg") }
             contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) } }
             runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo!", Toast.LENGTH_LONG).show() }
         }
@@ -58,7 +59,7 @@ class MainActivity : AppCompatActivity() {
         camLay.addView(FrameLayout(this).apply { clipChildren = true; addView(pv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
 
         val top = LinearLayout(this).apply { setPadding(36, 24, 36, 24); gravity = Gravity.CENTER_VERTICAL; background = glass(0x55FFFFFF, 0x22FFFFFF, 0x99FFFFFF, 60f) }
-        tvZoom = TextView(this).apply { text = "XIAOMI 14T • 1.0x LANCZOS AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD }
+        tvZoom = TextView(this).apply { text = "14T • 1.0x LOCAL NPU AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD }
         top.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(24, 52, 24, 0) })
 
@@ -78,7 +79,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         bot.addView(Button(this).apply {
-            text = "CAPTURE • 8-CORE LANCZOS-3 AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
+            text = "CAPTURE • LOCAL NPU + NLM AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
             background = glass(0xEEFF6900, 0xBBCC2200, 0xCCFFFFFF, 60f); setOnClickListener { takePhoto() }
         }, LinearLayout.LayoutParams(MATCH_PARENT, 136))
         camLay.addView(bot, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 36) })
@@ -90,7 +91,7 @@ class MainActivity : AppCompatActivity() {
         edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 10 })
 
         val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 20, 28, 20); background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 52f) }
-        card.addView(TextView(this).apply { text = "↔ VLEVO Surový výřez | VPRAVO Lanczos-3 + PDE AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
+        card.addView(TextView(this).apply { text = "↔ VLEVO Surový výřez | VPRAVO Local NPU + NLM AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
         sbSplit = SeekBar(this).apply {
             max = 100; progress = 50
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -102,7 +103,7 @@ class MainActivity : AppCompatActivity() {
 
         val upRow = LinearLayout(this)
         upRow.addView(Button(this).apply {
-            text = "✨ 2x Lanczos Upscale"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
+            text = "✨ 2x Local AI Upscale"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
             background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 36f); setOnClickListener { curScale = 2; recalcAi() }
         }, LinearLayout.LayoutParams(0, 105, 1f).apply { rightMargin = 6 })
         upRow.addView(Button(this).apply {
@@ -111,9 +112,9 @@ class MainActivity : AppCompatActivity() {
         }, LinearLayout.LayoutParams(0, 105, 1f).apply { leftMargin = 6 })
         card.addView(upRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 6 })
 
-        sbDepix = slider(card, "1. Anisotropic De-Pixelate (Odstranění čtverečků)", 100, 80)
-        sbDetail = slider(card, "2. Deconvolution Edge Detail (Ostrost hran)", 100, 75)
-        sbClarity = slider(card, "3. Local Texture Structure (Kresba bez změny jasu)", 100, 60)
+        sbDepix = slider(card, "1. NLM Patch De-Pixelate (Hledání 3x3 vzorů bez čtverečků)", 100, 85)
+        sbDetail = slider(card, "2. Directional Edge Clamp (Ostré šikmé hrany bez duchů)", 100, 80)
+        sbClarity = slider(card, "3. Luma Deconvolution (Hloubka detailů)", 100, 65)
 
         val act = LinearLayout(this)
         act.addView(Button(this).apply { text = "Retake"; setTextColor(Color.WHITE); background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f); setOnClickListener { edLay.visibility = View.GONE; camLay.visibility = View.VISIBLE } }, LinearLayout.LayoutParams(0, 108, 1f).apply { rightMargin = 8 })
@@ -150,7 +151,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setZoom(z: Float) {
         curZoom = z.coerceIn(1f, 100f); val hw = min(curZoom, maxHw); cam?.cameraControl?.setZoomRatio(hw); swZoom = (curZoom / hw).coerceAtLeast(1f)
-        pv.scaleX = swZoom; pv.scaleY = swZoom; tvZoom.text = String.format("XIAOMI 14T • %.1fx LANCZOS AI", curZoom)
+        pv.scaleX = swZoom; pv.scaleY = swZoom; tvZoom.text = String.format("14T • %.1fx LOCAL NPU AI", curZoom)
     }
 
     private fun takePhoto() {
@@ -164,8 +165,8 @@ class MainActivity : AppCompatActivity() {
                     val cw = max(140, (b.width / swZoom).roundToInt()); val ch = max(140, (b.height / swZoom).roundToInt())
                     val crop = Bitmap.createBitmap(b, (b.width - cw) / 2, (b.height - ch) / 2, cw, ch)
                     rawBmp = crop; curScale = 2
-                    aiBmp = RealAiEngine.processRealAi(crop, 2, 0.80f, 0.75f, 0.60f)
-                    runOnUiThread { prog.visibility = View.GONE; sbSplit.progress = 50; sbDepix.progress = 80; sbDetail.progress = 75; sbClarity.progress = 60; camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit() }
+                    aiBmp = RealAiEngine.processRealAi(applicationContext, crop, 2, 0.85f, 0.80f, 0.65f)
+                    runOnUiThread { prog.visibility = View.GONE; sbSplit.progress = 50; sbDepix.progress = 85; sbDetail.progress = 80; sbClarity.progress = 65; camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit() }
                 }
             }
             override fun onError(e: ImageCaptureException) { prog.visibility = View.GONE }
@@ -175,7 +176,7 @@ class MainActivity : AppCompatActivity() {
     private fun recalcAi() {
         val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
         val dp = sbDepix.progress / 100f; val dt = sbDetail.progress / 100f; val cl = sbClarity.progress / 100f
-        exec.execute { aiBmp = RealAiEngine.processRealAi(orig, curScale, dp, dt, cl); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
+        exec.execute { aiBmp = RealAiEngine.processRealAi(applicationContext, orig, curScale, dp, dt, cl); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
     }
 
     private fun renderSplit() {
@@ -185,6 +186,6 @@ class MainActivity : AppCompatActivity() {
         cv.drawBitmap(ai, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
         if (sx > 0) { cv.save(); cv.clipRect(0, 0, sx, h); cv.drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, w, h), null); cv.restore() }
         if (sx in 2..(w - 2)) cv.drawLine(sx.toFloat(), 0f, sx.toFloat(), h.toFloat(), Paint().apply { color = Color.CYAN; strokeWidth = 5f })
-        ivEd.setImageBitmap(comp); tvStatus.text = "LANCZOS-3 + PDE AI • ${w}x${h} px (Raw: ${orig.width}x${orig.height})"
+        ivEd.setImageBitmap(comp); tvStatus.text = "${RealAiEngine.engineName} • ${w}x${h} px"
     }
 }
