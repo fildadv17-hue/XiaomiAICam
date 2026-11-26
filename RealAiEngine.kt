@@ -29,11 +29,6 @@ data class CapturedPhotoPair(
 
 object RealAiEngine {
 
-    /**
-     * Splits requested 1x..250x zoom into:
-     * 1) Hardware CameraX zoom ratio (up to Xiaomi 14T max hardware zoom)
-     * 2) Digital AI crop multiplier for the remaining magnification up to 250x
-     */
     fun calculateZoomSplit(requestedZoom: Float, hardwareMaxZoom: Float): Pair<Float, Float> {
         val clampedRequest = requestedZoom.coerceIn(1f, 250f)
         val hwZoom = min(clampedRequest, hardwareMaxZoom)
@@ -41,11 +36,6 @@ object RealAiEngine {
         return Pair(hwZoom, digitalMultiplier)
     }
 
-    /**
-     * Generates both versions for the post-capture sidebar:
-     * - withoutAi: Raw digital zoom crop with unprocessed sensor colors
-     * - withAi: Leica color science + micro-contrast + AI detail reconstruction
-     */
     fun processCapturePair(
         source: Bitmap,
         digitalMultiplier: Float,
@@ -54,7 +44,7 @@ object RealAiEngine {
     ): CapturedPhotoPair {
         val normalizedSource = limitMaxDimension(source, maxEdge = 2560)
 
-        // 1. WITHOUT AI: Standard raw sensor crop without Leica or AI sharpening
+        // 1. WITHOUT AI: Raw sensor zoom crop without Leica color grading or AI sharpening
         val withoutAi = if (digitalMultiplier > 1.01f) {
             val cropWidth = (normalizedSource.width / digitalMultiplier).toInt().coerceAtLeast(32)
             val cropHeight = (normalizedSource.height / digitalMultiplier).toInt().coerceAtLeast(32)
@@ -68,7 +58,7 @@ object RealAiEngine {
             normalizedSource.copy(Bitmap.Config.ARGB_8888, false)
         }
 
-        // 2. WITH AI: Apply Leica Color Matrix + AI Detail Sharpening
+        // 2. WITH AI: Leica color science + AI edge reconstruction
         val graded = applyLeicaColorMatrix(withoutAi, leicaProfile)
         val withAi = applyAiSharpen(graded, strength = quality.sharpenStrength)
         if (graded !== withAi && graded !== withoutAi) {
