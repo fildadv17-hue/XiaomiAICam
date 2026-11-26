@@ -1,191 +1,442 @@
-package com.example.xiaomiaicam
+package com.fildadv.xiaomiaicam
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.ContentValues
+import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.*
-import android.graphics.drawable.GradientDrawable
-import android.hardware.camera2.CaptureRequest
-import android.os.*
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.os.Build
+import android.os.Bundle
 import android.provider.MediaStore
-import android.view.*
-import android.view.ViewGroup.LayoutParams.*
-import android.widget.*
+import android.widget.ImageView
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.*
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.*
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import java.nio.ByteBuffer
 import java.util.concurrent.Executors
-import kotlin.math.*
+import kotlin.math.roundToInt
 
-class MainActivity : AppCompatActivity() {
-    private lateinit var pv: PreviewView; private lateinit var camLay: FrameLayout; private lateinit var edLay: LinearLayout
-    private lateinit var ivEd: ImageView; private lateinit var tvZoom: TextView; private lateinit var tvStatus: TextView
-    private lateinit var prog: ProgressBar; private lateinit var sbSplit: SeekBar
-    private lateinit var sbDepix: SeekBar; private lateinit var sbDetail: SeekBar; private lateinit var sbClarity: SeekBar
-    private var imgCap: ImageCapture? = null; private var cam: androidx.camera.core.Camera? = null
-    private val exec = Executors.newSingleThreadExecutor()
-    private var curZoom = 1f; private var maxHw = 20f; private var swZoom = 1f; private var curScale = 2
-    private var rawBmp: Bitmap? = null; private var aiBmp: Bitmap? = null
-    private val perm = registerForActivityResult(ActivityResultContracts.RequestPermission()) { if (it) startCam() }
-
-    override fun onCreate(s: Bundle?) {
-        super.onCreate(s); buildUi()
-        RealAiEngine.initLocalModel(applicationContext)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) startCam()
-        else perm.launch(Manifest.permission.CAMERA)
-    }
-
-    private fun saveImg() {
-        val b = aiBmp ?: return; prog.visibility = View.VISIBLE
-        exec.execute {
-            val cv = ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, "14T_LocalAI_${System.currentTimeMillis()}.jpg"); put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg") }
-            contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv)?.let { contentResolver.openOutputStream(it)?.use { s -> b.compress(Bitmap.CompressFormat.JPEG, 100, s) } }
-            runOnUiThread { prog.visibility = View.GONE; Toast.makeText(this, "Uloženo!", Toast.LENGTH_LONG).show() }
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                XiaomiAiCamScreen()
+            }
         }
     }
+}
 
-    private fun glass(c1: Long, c2: Long, st: Long, r: Float) =
-        GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(c1.toInt(), c2.toInt())).apply { cornerRadius = r; setStroke(3, st.toInt()) }
+@Composable
+fun XiaomiAiCamScreen() {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
 
-    private fun buildUi() {
-        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
-        camLay = FrameLayout(this); pv = PreviewView(this)
-        camLay.addView(FrameLayout(this).apply { clipChildren = true; addView(pv, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)) }, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+    var hasPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
 
-        val top = LinearLayout(this).apply { setPadding(36, 24, 36, 24); gravity = Gravity.CENTER_VERTICAL; background = glass(0x55FFFFFF, 0x22FFFFFF, 0x99FFFFFF, 60f) }
-        tvZoom = TextView(this).apply { text = "14T • 1.0x LOCAL NPU AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD }
-        top.addView(tvZoom, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-        camLay.addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP).apply { setMargins(24, 52, 24, 0) })
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> hasPermission = granted }
 
-        val bot = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(36, 32, 36, 40); background = glass(0x48FFFFFF, 0x18FFFFFF, 0x99FFFFFF, 68f) }
-        val sbZ = SeekBar(this).apply { max = 990 }
-        val zRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
-        listOf(1f, 2f, 4f, 20f, 100f).forEach { z ->
-            zRow.addView(Button(this).apply {
-                text = "${z.toInt()}x"; setTextColor(Color.WHITE); textSize = 12f; background = glass(0x40FFFFFF, 0x15FFFFFF, 0x77FFFFFF, 36f)
-                setOnClickListener { sbZ.progress = ((z - 1f) * 10f).toInt() }
-            }, LinearLayout.LayoutParams(0, 100, 1f).apply { setMargins(6, 0, 6, 0) })
+    LaunchedEffect(Unit) {
+        if (!hasPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+    }
+
+    if (!hasPermission) {
+        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            LiquidGlassButton(text = "Enable Camera Permission", isActive = true) {
+                permissionLauncher.launch(Manifest.permission.CAMERA)
+            }
         }
-        bot.addView(zRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        bot.addView(sbZ, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 20; bottomMargin = 20 })
-        sbZ.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, p: Int, f: Boolean) { setZoom(1f + p / 10f) }
-            override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
-        })
-        bot.addView(Button(this).apply {
-            text = "CAPTURE • LOCAL NPU + NLM AI"; setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.DEFAULT_BOLD
-            background = glass(0xEEFF6900, 0xBBCC2200, 0xCCFFFFFF, 60f); setOnClickListener { takePhoto() }
-        }, LinearLayout.LayoutParams(MATCH_PARENT, 136))
-        camLay.addView(bot, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM).apply { setMargins(24, 0, 24, 36) })
-
-        edLay = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(Color.parseColor("#090C12")); visibility = View.GONE; setPadding(24, 44, 24, 28) }
-        tvStatus = TextView(this).apply { setTextColor(Color.CYAN); textSize = 12f; typeface = Typeface.DEFAULT_BOLD; setPadding(24, 16, 24, 16); background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f) }
-        edLay.addView(tvStatus, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 10 })
-        ivEd = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        edLay.addView(ivEd, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f).apply { bottomMargin = 10 })
-
-        val card = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(28, 20, 28, 20); background = glass(0x40FFFFFF, 0x16FFFFFF, 0x88FFFFFF, 52f) }
-        card.addView(TextView(this).apply { text = "↔ VLEVO Surový výřez | VPRAVO Local NPU + NLM AI"; setTextColor(Color.YELLOW); textSize = 12f; typeface = Typeface.DEFAULT_BOLD })
-        sbSplit = SeekBar(this).apply {
-            max = 100; progress = 50
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) { renderSplit() }
-                override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) {}
-            })
-        }
-        card.addView(sbSplit, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 6 })
-
-        val upRow = LinearLayout(this)
-        upRow.addView(Button(this).apply {
-            text = "✨ 2x Local AI Upscale"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
-            background = glass(0xDD00C6FF, 0xBB0062FF, 0xBBFFFFFF, 36f); setOnClickListener { curScale = 2; recalcAi() }
-        }, LinearLayout.LayoutParams(0, 105, 1f).apply { rightMargin = 6 })
-        upRow.addView(Button(this).apply {
-            text = "🚀 4x Ultra Super-Res"; setTextColor(Color.WHITE); textSize = 11f; typeface = Typeface.DEFAULT_BOLD
-            background = glass(0xDDAA00FF, 0xBB5500CC, 0xBBFFFFFF, 36f); setOnClickListener { curScale = 4; recalcAi() }
-        }, LinearLayout.LayoutParams(0, 105, 1f).apply { leftMargin = 6 })
-        card.addView(upRow, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = 6 })
-
-        sbDepix = slider(card, "1. NLM Patch De-Pixelate (Hledání 3x3 vzorů bez čtverečků)", 100, 85)
-        sbDetail = slider(card, "2. Directional Edge Clamp (Ostré šikmé hrany bez duchů)", 100, 80)
-        sbClarity = slider(card, "3. Luma Deconvolution (Hloubka detailů)", 100, 65)
-
-        val act = LinearLayout(this)
-        act.addView(Button(this).apply { text = "Retake"; setTextColor(Color.WHITE); background = glass(0x38FFFFFF, 0x14FFFFFF, 0x66FFFFFF, 40f); setOnClickListener { edLay.visibility = View.GONE; camLay.visibility = View.VISIBLE } }, LinearLayout.LayoutParams(0, 108, 1f).apply { rightMargin = 8 })
-        act.addView(Button(this).apply { text = "Save AI"; setTextColor(Color.WHITE); background = glass(0xDD00E676, 0xAA00B0FF, 0xBBFFFFFF, 40f); setOnClickListener { saveImg() } }, LinearLayout.LayoutParams(0, 108, 1f).apply { leftMargin = 8 })
-        card.addView(act, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { topMargin = 8 })
-        edLay.addView(card, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-
-        prog = ProgressBar(this).apply { visibility = View.GONE }
-        root.addView(camLay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)); root.addView(edLay, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-        root.addView(prog, FrameLayout.LayoutParams(150, 150, Gravity.CENTER)); setContentView(root)
+        return
     }
 
-    private fun slider(p: LinearLayout, txt: String, m: Int, d: Int): SeekBar {
-        p.addView(TextView(this).apply { text = txt; setTextColor(Color.WHITE); textSize = 11f })
-        return SeekBar(this).apply {
-            max = m; progress = d
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(s: SeekBar?, v: Int, u: Boolean) {}; override fun onStartTrackingTouch(s: SeekBar?) {}; override fun onStopTrackingTouch(s: SeekBar?) { recalcAi() }
-            }); p.addView(this)
-        }
+    // Camera & AI States
+    var totalZoom by remember { mutableFloatStateOf(1f) } // 1x to 250x
+    var hardwareMaxZoom by remember { mutableFloatStateOf(20f) }
+    var selectedLeica by remember { mutableStateOf(LeicaProfile.LEICA_WARM) }
+    var selectedQuality by remember { mutableStateOf(PhotoQuality.AI_ULTRA) }
+    var aiEnhanceActive by remember { mutableStateOf(true) }
+    var isProcessing by remember { mutableStateOf(false) }
+
+    // Retake State
+    var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+
+    var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
+    val imageCapture = remember {
+        ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+            .build()
     }
 
-    @SuppressLint("UnsafeOptInUsageError")
-    private fun startCam() {
-        val f = ProcessCameraProvider.getInstance(this)
-        f.addListener({
-            val p = f.get(); val prev = Preview.Builder().build().also { it.setSurfaceProvider(pv.surfaceProvider) }
-            val cb = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).setJpegQuality(100)
-            Camera2Interop.Extender(cb).setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY).setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
-            imgCap = cb.build()
-            try { p.unbindAll(); cam = p.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, prev, imgCap); cam?.cameraInfo?.zoomState?.observe(this) { maxHw = it.maxZoomRatio.coerceAtLeast(1f) } } catch (e: Exception) {}
-        }, ContextCompat.getMainExecutor(this))
+    val (hwZoom, digitalMultiplier) = RealAiEngine.calculateZoomSplit(totalZoom, hardwareMaxZoom)
+
+    LaunchedEffect(hwZoom, cameraControl) {
+        cameraControl?.setZoomRatio(hwZoom)
     }
 
-    private fun setZoom(z: Float) {
-        curZoom = z.coerceIn(1f, 100f); val hw = min(curZoom, maxHw); cam?.cameraControl?.setZoomRatio(hw); swZoom = (curZoom / hw).coerceAtLeast(1f)
-        pv.scaleX = swZoom; pv.scaleY = swZoom; tvZoom.text = String.format("14T • %.1fx LOCAL NPU AI", curZoom)
+    // RETAKE REVIEW SCREEN
+    if (capturedBitmap != null) {
+        RetakeReviewScreen(
+            bitmap = capturedBitmap!!,
+            zoomLevel = totalZoom,
+            leicaProfile = selectedLeica,
+            quality = selectedQuality,
+            onRetake = { capturedBitmap = null },
+            onSave = {
+                saveBitmapToGallery(context, capturedBitmap!!, selectedQuality.jpegQuality)
+                Toast.makeText(context, "Saved (${selectedQuality.label})", Toast.LENGTH_SHORT).show()
+                capturedBitmap = null
+            }
+        )
+        return
     }
 
-    private fun takePhoto() {
-        val cap = imgCap ?: return; prog.visibility = View.VISIBLE
-        cap.takePicture(ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageCapturedCallback() {
-            override fun onCaptureSuccess(img: ImageProxy) {
-                val rot = img.imageInfo.rotationDegrees; val buf: ByteBuffer = img.planes[0].buffer; val bytes = ByteArray(buf.remaining()).also { buf.get(it) }; img.close()
-                exec.execute {
-                    var b = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                    if (rot != 0) b = Bitmap.createBitmap(b, 0, 0, b.width, b.height, Matrix().apply { postRotate(rot.toFloat()) }, true)
-                    val cw = max(140, (b.width / swZoom).roundToInt()); val ch = max(140, (b.height / swZoom).roundToInt())
-                    val crop = Bitmap.createBitmap(b, (b.width - cw) / 2, (b.height - ch) / 2, cw, ch)
-                    rawBmp = crop; curScale = 2
-                    aiBmp = RealAiEngine.processRealAi(applicationContext, crop, 2, 0.85f, 0.80f, 0.65f)
-                    runOnUiThread { prog.visibility = View.GONE; sbSplit.progress = 50; sbDepix.progress = 85; sbDetail.progress = 80; sbClarity.progress = 65; camLay.visibility = View.GONE; edLay.visibility = View.VISIBLE; renderSplit() }
+    // LIVE CAMERA VIEWFINDER
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = digitalMultiplier
+                    scaleY = digitalMultiplier
+                },
+            factory = { ctx ->
+                val previewView = PreviewView(ctx)
+                val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+                cameraProviderFuture.addListener({
+                    val cameraProvider = cameraProviderFuture.get()
+                    val preview = Preview.Builder().build().also {
+                        it.surfaceProvider = previewView.surfaceProvider
+                    }
+                    try {
+                        cameraProvider.unbindAll()
+                        val camera = cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            CameraSelector.DEFAULT_BACK_CAMERA,
+                            preview,
+                            imageCapture
+                        )
+                        cameraControl = camera.cameraControl
+                        hardwareMaxZoom = camera.cameraInfo.zoomState.value?.maxZoomRatio ?: 20f
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }, ContextCompat.getMainExecutor(ctx))
+                previewView
+            }
+        )
+
+        // TOP LIQUID GLASS BAR: Quality, AI Toggle & Leica Settings
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LiquidGlassButton(
+                    text = "Quality: ${selectedQuality.label}",
+                    isActive = true,
+                    onClick = {
+                        val values = PhotoQuality.entries
+                        selectedQuality = values[(selectedQuality.ordinal + 1) % values.size]
+                    }
+                )
+
+                LiquidGlassButton(
+                    text = if (aiEnhanceActive) "AI Liquid: ON" else "AI Liquid: OFF",
+                    isActive = aiEnhanceActive,
+                    accentColor = Color(0xFF64D2FF),
+                    onClick = { aiEnhanceActive = !aiEnhanceActive }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // LEICA SETTINGS: Warm / Cold / Vibrant / Natural
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                LeicaProfile.entries.forEach { profile ->
+                    LiquidGlassButton(
+                        text = profile.label,
+                        isActive = selectedLeica == profile,
+                        accentColor = when (profile) {
+                            LeicaProfile.LEICA_WARM -> Color(0xFFFF9E44)
+                            LeicaProfile.LEICA_COLD -> Color(0xFF56CCF2)
+                            LeicaProfile.LEICA_VIBRANT -> Color(0xFFFF4B4B)
+                            LeicaProfile.LEICA_NATURAL -> Color(0xFFE0E0E0)
+                        },
+                        onClick = { selectedLeica = profile }
+                    )
                 }
             }
-            override fun onError(e: ImageCaptureException) { prog.visibility = View.GONE }
-        })
-    }
+        }
 
-    private fun recalcAi() {
-        val orig = rawBmp ?: return; prog.visibility = View.VISIBLE
-        val dp = sbDepix.progress / 100f; val dt = sbDetail.progress / 100f; val cl = sbClarity.progress / 100f
-        exec.execute { aiBmp = RealAiEngine.processRealAi(applicationContext, orig, curScale, dp, dt, cl); runOnUiThread { prog.visibility = View.GONE; renderSplit() } }
-    }
+        // BOTTOM LIQUID GLASS CONTROLS: 250x Zoom + Shutter
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            LiquidGlassContainer(modifier = Modifier.padding(bottom = 8.dp)) {
+                Text(
+                    text = "${totalZoom.roundToInt()}x  ${if (totalZoom > hardwareMaxZoom) "• AI 250x ENGINE" else "• OPTICAL/HYBRID"}",
+                    color = if (totalZoom >= 100f) Color(0xFFFF5252) else Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                )
+            }
 
-    private fun renderSplit() {
-        val orig = rawBmp ?: return; val ai = aiBmp ?: return
-        val w = ai.width; val h = ai.height; val sx = (w * (sbSplit.progress / 100f)).roundToInt().coerceIn(0, w)
-        val comp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888); val cv = Canvas(comp)
-        cv.drawBitmap(ai, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
-        if (sx > 0) { cv.save(); cv.clipRect(0, 0, sx, h); cv.drawBitmap(orig, Rect(0, 0, orig.width, orig.height), Rect(0, 0, w, h), null); cv.restore() }
-        if (sx in 2..(w - 2)) cv.drawLine(sx.toFloat(), 0f, sx.toFloat(), h.toFloat(), Paint().apply { color = Color.CYAN; strokeWidth = 5f })
-        ivEd.setImageBitmap(comp); tvStatus.text = "${RealAiEngine.engineName} • ${w}x${h} px"
+            // Zoom Preset Buttons up to 250x
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                listOf(1f, 5f, 10f, 50f, 100f, 250f).forEach { preset ->
+                    LiquidGlassButton(
+                        text = "${preset.toInt()}x",
+                        isActive = totalZoom.roundToInt() == preset.toInt(),
+                        accentColor = Color(0xFFFF3B30),
+                        onClick = { totalZoom = preset }
+                    )
+                }
+            }
+
+            Slider(
+                value = totalZoom,
+                onValueChange = { totalZoom = it },
+                valueRange = 1f..250f,
+                colors = SliderDefaults.colors(
+                    thumbColor = Color.White,
+                    activeTrackColor = Color(0xFFFF3B30),
+                    inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+                ),
+                modifier = Modifier.padding(vertical = 6.dp)
+            )
+
+            // Liquid Glass Shutter Button
+            Box(
+                modifier = Modifier
+                    .size(78.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Color.White.copy(alpha = 0.35f),
+                                Color.White.copy(alpha = 0.12f)
+                            )
+                        )
+                    )
+                    .border(2.dp, Color.White.copy(alpha = 0.85f), CircleShape)
+                    .clickable(enabled = !isProcessing) {
+                        isProcessing = true
+                        imageCapture.takePicture(
+                            cameraExecutor,
+                            object : ImageCapture.OnImageCapturedCallback() {
+                                override fun onCaptureSuccess(image: ImageProxy) {
+                                    val rawBitmap = image.toBitmapRotated()
+                                    image.close()
+                                    val processed = RealAiEngine.processCapturedImage(
+                                        source = rawBitmap,
+                                        digitalMultiplier = digitalMultiplier,
+                                        leicaProfile = selectedLeica,
+                                        quality = selectedQuality,
+                                        aiLiquidEnhanceEnabled = aiEnhanceActive
+                                    )
+                                    capturedBitmap = processed
+                                    isProcessing = false
+                                }
+
+                                override fun onError(exception: ImageCaptureException) {
+                                    isProcessing = false
+                                }
+                            }
+                        )
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(60.dp)
+                        .clip(CircleShape)
+                        .background(if (isProcessing) Color.Gray else Color.White)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun RetakeReviewScreen(
+    bitmap: Bitmap,
+    zoomLevel: Float,
+    leicaProfile: LeicaProfile,
+    quality: PhotoQuality,
+    onRetake: () -> Unit,
+    onSave: () -> Unit
+) {
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { ctx ->
+                ImageView(ctx).apply {
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    setImageBitmap(bitmap)
+                }
+            }
+        )
+
+        LiquidGlassContainer(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .statusBarsPadding()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "${zoomLevel.roundToInt()}x  |  ${leicaProfile.label}  |  ${quality.label}",
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+
+        Row(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .fillMaxWidth()
+                .padding(24.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            LiquidGlassButton(
+                text = "↺ Retake",
+                isActive = true,
+                accentColor = Color(0xFFFF453A),
+                onClick = onRetake
+            )
+            LiquidGlassButton(
+                text = "✓ Save Photo",
+                isActive = true,
+                accentColor = Color(0xFF32D74B),
+                onClick = onSave
+            )
+        }
+    }
+}
+
+@Composable
+fun LiquidGlassContainer(
+    modifier: Modifier = Modifier,
+    borderColor: Color = Color.White.copy(alpha = 0.45f),
+    content: @Composable BoxScope.() -> Unit
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color.White.copy(alpha = 0.25f),
+                        Color.White.copy(alpha = 0.08f)
+                    )
+                )
+            )
+            .border(
+                width = 1.dp,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        borderColor,
+                        Color.White.copy(alpha = 0.12f)
+                    )
+                ),
+                shape = RoundedCornerShape(50)
+            ),
+        content = content
+    )
+}
+
+@Composable
+fun LiquidGlassButton(
+    text: String,
+    isActive: Boolean = false,
+    accentColor: Color = Color.White,
+    onClick: () -> Unit
+) {
+    LiquidGlassContainer(
+        borderColor = if (isActive) accentColor else Color.White.copy(alpha = 0.35f),
+        modifier = Modifier.clickable { onClick() }
+    ) {
+        Text(
+            text = text,
+            color = if (isActive) accentColor else Color.White.copy(alpha = 0.9f),
+            fontSize = 12.sp,
+            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+        )
+    }
+}
+
+fun ImageProxy.toBitmapRotated(): Bitmap {
+    val bitmap = toBitmap()
+    val matrix = Matrix().apply { postRotate(imageInfo.rotationDegrees.toFloat()) }
+    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+}
+
+fun saveBitmapToGallery(context: Context, bitmap: Bitmap, quality: Int) {
+    val filename = "XiaomiAICam_${System.currentTimeMillis()}.jpg"
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/XiaomiAICam")
+        }
+    }
+    val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+    uri?.let {
+        context.contentResolver.openOutputStream(it)?.use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+        }
     }
 }
