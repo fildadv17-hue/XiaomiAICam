@@ -55,15 +55,14 @@ object RealAiEngine {
         val z = max(1f, zoomFactor)
         val cropW = (src.width / z).coerceAtLeast(64f)
         val cropH = (src.height / z).coerceAtLeast(64f)
-        val left = ((src.width - cropW) / 2f).coerceAtLeast(0f)
-        val top = ((src.height - cropH) / 2f).coerceAtLeast(0f)
+        val left = ((src.width - cropW) / 2f).coerceAtLeast(0f).toInt()
+        val top = ((src.height - cropH) / 2f).coerceAtLeast(0f).toInt()
+        val right = min(src.width, left + cropW.toInt()).coerceAtLeast(left + 1)
+        val bottom = min(src.height, top + cropH.toInt()).coerceAtLeast(top + 1)
 
-        canvas.drawBitmap(
-            src,
-            RectF(left, top, min(src.width.toFloat(), left + cropW), min(src.height.toFloat(), top + cropH)),
-            RectF(0f, 0f, targetW.toFloat(), targetH.toFloat()),
-            paint
-        )
+        val srcRect = Rect(left, top, right, bottom)
+        val dstRect = RectF(0f, 0f, targetW.toFloat(), targetH.toFloat())
+        canvas.drawBitmap(src, srcRect, dstRect, paint)
         return output
     }
 
@@ -128,3 +127,4 @@ object RealAiEngine {
     }
 }
 // END OF FILE
+
