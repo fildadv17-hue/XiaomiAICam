@@ -9,7 +9,6 @@ import android.graphics.Matrix
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
-import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,6 +18,7 @@ import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,16 +27,27 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
+
+enum class ReviewMode {
+    WITH_AI,
+    WITHOUT_AI,
+    SPLIT_COMPARE
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,16 +90,14 @@ fun XiaomiAiCamScreen() {
         return
     }
 
-    // Camera & AI States
-    var totalZoom by remember { mutableFloatStateOf(1f) } // 1x to 250x
+    var totalZoom by remember { mutableFloatStateOf(1f) }
     var hardwareMaxZoom by remember { mutableFloatStateOf(20f) }
     var selectedLeica by remember { mutableStateOf(LeicaProfile.LEICA_WARM) }
     var selectedQuality by remember { mutableStateOf(PhotoQuality.AI_ULTRA) }
     var aiEnhanceActive by remember { mutableStateOf(true) }
     var isProcessing by remember { mutableStateOf(false) }
 
-    // Retake State
-    var capturedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var capturedPair by remember { mutableStateOf<CapturedPhotoPair?>(null) }
 
     var cameraControl by remember { mutableStateOf<CameraControl?>(null) }
     val imageCapture = remember {
@@ -103,24 +112,22 @@ fun XiaomiAiCamScreen() {
         cameraControl?.setZoomRatio(hwZoom)
     }
 
-    // RETAKE REVIEW SCREEN
-    if (capturedBitmap != null) {
+    if (capturedPair != null) {
         RetakeReviewScreen(
-            bitmap = capturedBitmap!!,
+            photoPair = capturedPair!!,
+            initialAiDefault = aiEnhanceActive,
             zoomLevel = totalZoom,
             leicaProfile = selectedLeica,
-            quality = selectedQuality,
-            onRetake = { capturedBitmap = null },
-            onSave = {
-                saveBitmapToGallery(context, capturedBitmap!!, selectedQuality.jpegQuality)
-                Toast.makeText(context, "Saved (${selectedQuality.label})", Toast.LENGTH_SHORT).show()
-                capturedBitmap = null
+            onRetake = { capturedPair = null },
+            onSave = { bitmapToSave, label ->
+                saveBitmapToGallery(context, bitmapToSave, selectedQuality.jpegQuality, label)
+                Toast.makeText(context, "Saved $label (${selectedQuality.label})", Toast.LENGTH_SHORT).show()
+                capturedPair = null
             }
         )
         return
     }
 
-    // LIVE CAMERA VIEWFINDER
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             modifier = Modifier
@@ -155,7 +162,6 @@ fun XiaomiAiCamScreen() {
             }
         )
 
-        // TOP LIQUID GLASS BAR: Quality, AI Toggle & Leica Settings
         Column(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -187,7 +193,6 @@ fun XiaomiAiCamScreen() {
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // LEICA SETTINGS: Warm / Cold / Vibrant / Natural
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -210,7 +215,6 @@ fun XiaomiAiCamScreen() {
             }
         }
 
-        // BOTTOM LIQUID GLASS CONTROLS: 250x Zoom + Shutter
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -228,7 +232,6 @@ fun XiaomiAiCamScreen() {
                 )
             }
 
-            // Zoom Preset Buttons up to 250x
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly
@@ -255,7 +258,6 @@ fun XiaomiAiCamScreen() {
                 modifier = Modifier.padding(vertical = 6.dp)
             )
 
-            // Liquid Glass Shutter Button
             Box(
                 modifier = Modifier
                     .size(78.dp)
@@ -275,17 +277,18 @@ fun XiaomiAiCamScreen() {
                             cameraExecutor,
                             object : ImageCapture.OnImageCapturedCallback() {
                                 override fun onCaptureSuccess(image: ImageProxy) {
-                                    val rawBitmap = image.toBitmapRotated()
-                                    image.close()
-                                    val processed = RealAiEngine.processCapturedImage(
-                                        source = rawBitmap,
-                                        digitalMultiplier = digitalMultiplier,
-                                        leicaProfile = selectedLeica,
-                                        quality = selectedQuality,
-                                        aiLiquidEnhanceEnabled = aiEnhanceActive
-                                    )
-                                    capturedBitmap = processed
-                                    isProcessing = false
+                                    try {
+                                        val rawBitmap = image.toBitmapRotated()
+                                        capturedPair = RealAiEngine.processCapturePair(
+                                            source = rawBitmap,
+                                            digitalMultiplier = digitalMultiplier,
+                                            leicaProfile = selectedLeica,
+                                            quality = selectedQuality
+                                        )
+                                    } finally {
+                                        image.close()
+                                        isProcessing = false
+                                    }
                                 }
 
                                 override fun onError(exception: ImageCaptureException) {
@@ -309,23 +312,81 @@ fun XiaomiAiCamScreen() {
 
 @Composable
 fun RetakeReviewScreen(
-    bitmap: Bitmap,
+    photoPair: CapturedPhotoPair,
+    initialAiDefault: Boolean,
     zoomLevel: Float,
     leicaProfile: LeicaProfile,
-    quality: PhotoQuality,
     onRetake: () -> Unit,
-    onSave: () -> Unit
+    onSave: (Bitmap, String) -> Unit
 ) {
+    var reviewMode by remember {
+        mutableStateOf(if (initialAiDefault) ReviewMode.WITH_AI else ReviewMode.WITHOUT_AI)
+    }
+    var splitFraction by remember { mutableFloatStateOf(0.5f) }
+
+    val withoutAiImage = remember(photoPair.withoutAi) { photoPair.withoutAi.asImageBitmap() }
+    val withAiImage = remember(photoPair.withAi) { photoPair.withAi.asImageBitmap() }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                ImageView(ctx).apply {
-                    scaleType = ImageView.ScaleType.FIT_CENTER
-                    setImageBitmap(bitmap)
+
+        when (reviewMode) {
+            ReviewMode.WITH_AI -> {
+                Image(
+                    bitmap = withAiImage,
+                    contentDescription = "Photo With AI",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            ReviewMode.WITHOUT_AI -> {
+                Image(
+                    bitmap = withoutAiImage,
+                    contentDescription = "Photo Without AI",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            ReviewMode.SPLIT_COMPARE -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectHorizontalDragGestures { _, dragAmount ->
+                                val widthPx = size.width.toFloat().coerceAtLeast(1f)
+                                splitFraction = (splitFraction + (dragAmount / widthPx)).coerceIn(0.1f, 0.9f)
+                            }
+                        }
+                ) {
+                    Image(
+                        bitmap = withoutAiImage,
+                        contentDescription = "Without AI Base",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    Image(
+                        bitmap = withAiImage,
+                        contentDescription = "With AI Overlay",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .drawWithContent {
+                                val splitX = size.width * splitFraction
+                                clipRect(left = splitX) {
+                                    this@drawWithContent.drawContent()
+                                }
+                                drawLine(
+                                    color = Color(0xFF64D2FF),
+                                    start = Offset(splitX, 0f),
+                                    end = Offset(splitX, size.height),
+                                    strokeWidth = 5f
+                                )
+                            }
+                    )
                 }
             }
-        )
+        }
 
         LiquidGlassContainer(
             modifier = Modifier
@@ -333,12 +394,77 @@ fun RetakeReviewScreen(
                 .statusBarsPadding()
                 .padding(16.dp)
         ) {
+            val modeTitle = when (reviewMode) {
+                ReviewMode.WITH_AI -> "WITH AI • ${leicaProfile.label}"
+                ReviewMode.WITHOUT_AI -> "WITHOUT AI • Raw Sensor"
+                ReviewMode.SPLIT_COMPARE -> "SPLIT: Left Without AI | Right With AI"
+            }
             Text(
-                text = "${zoomLevel.roundToInt()}x  |  ${leicaProfile.label}  |  ${quality.label}",
+                text = "${zoomLevel.roundToInt()}x  |  $modeTitle",
                 color = Color.White,
-                fontSize = 13.sp,
+                fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+
+        // POST-PHOTO SIDEBAR: WITHOUT AI / WITH AI / 50-50 SPLIT
+        Column(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp)
+                .width(94.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            Color.Black.copy(alpha = 0.60f),
+                            Color.White.copy(alpha = 0.14f)
+                        )
+                    )
+                )
+                .border(
+                    width = 1.dp,
+                    brush = Brush.verticalGradient(
+                        colors = listOf(
+                            Color.White.copy(alpha = 0.50f),
+                            Color.White.copy(alpha = 0.15f)
+                        )
+                    ),
+                    shape = RoundedCornerShape(24.dp)
+                )
+                .padding(vertical = 12.dp, horizontal = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "AI SIDEBAR",
+                color = Color.White.copy(alpha = 0.75f),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            SidebarPreviewCard(
+                title = "Without AI",
+                thumbnail = withoutAiImage,
+                isSelected = reviewMode == ReviewMode.WITHOUT_AI,
+                accentColor = Color(0xFFFFB84D),
+                onClick = { reviewMode = ReviewMode.WITHOUT_AI }
+            )
+
+            SidebarPreviewCard(
+                title = "With AI",
+                thumbnail = withAiImage,
+                isSelected = reviewMode == ReviewMode.WITH_AI,
+                accentColor = Color(0xFF64D2FF),
+                onClick = { reviewMode = ReviewMode.WITH_AI }
+            )
+
+            LiquidGlassButton(
+                text = "50/50",
+                isActive = reviewMode == ReviewMode.SPLIT_COMPARE,
+                accentColor = Color(0xFF64D2FF),
+                onClick = { reviewMode = ReviewMode.SPLIT_COMPARE }
             )
         }
 
@@ -356,87 +482,36 @@ fun RetakeReviewScreen(
                 accentColor = Color(0xFFFF453A),
                 onClick = onRetake
             )
+
+            val savingWithoutAi = reviewMode == ReviewMode.WITHOUT_AI
             LiquidGlassButton(
-                text = "✓ Save Photo",
+                text = if (savingWithoutAi) "✓ Save (Without AI)" else "✓ Save (With AI)",
                 isActive = true,
                 accentColor = Color(0xFF32D74B),
-                onClick = onSave
+                onClick = {
+                    if (savingWithoutAi) {
+                        onSave(photoPair.withoutAi, "WithoutAI")
+                    } else {
+                        onSave(photoPair.withAi, "WithAI")
+                    }
+                }
             )
         }
     }
 }
 
 @Composable
-fun LiquidGlassContainer(
-    modifier: Modifier = Modifier,
-    borderColor: Color = Color.White.copy(alpha = 0.45f),
-    content: @Composable BoxScope.() -> Unit
-) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(
-                        Color.White.copy(alpha = 0.25f),
-                        Color.White.copy(alpha = 0.08f)
-                    )
-                )
-            )
-            .border(
-                width = 1.dp,
-                brush = Brush.verticalGradient(
-                    colors = listOf(
-                        borderColor,
-                        Color.White.copy(alpha = 0.12f)
-                    )
-                ),
-                shape = RoundedCornerShape(50)
-            ),
-        content = content
-    )
-}
-
-@Composable
-fun LiquidGlassButton(
-    text: String,
-    isActive: Boolean = false,
-    accentColor: Color = Color.White,
+fun SidebarPreviewCard(
+    title: String,
+    thumbnail: ImageBitmap,
+    isSelected: Boolean,
+    accentColor: Color,
     onClick: () -> Unit
 ) {
-    LiquidGlassContainer(
-        borderColor = if (isActive) accentColor else Color.White.copy(alpha = 0.35f),
-        modifier = Modifier.clickable { onClick() }
-    ) {
-        Text(
-            text = text,
-            color = if (isActive) accentColor else Color.White.copy(alpha = 0.9f),
-            fontSize = 12.sp,
-            fontWeight = if (isActive) FontWeight.Bold else FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-        )
-    }
-}
-
-fun ImageProxy.toBitmapRotated(): Bitmap {
-    val bitmap = toBitmap()
-    val matrix = Matrix().apply { postRotate(imageInfo.rotationDegrees.toFloat()) }
-    return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-}
-
-fun saveBitmapToGallery(context: Context, bitmap: Bitmap, quality: Int) {
-    val filename = "XiaomiAICam_${System.currentTimeMillis()}.jpg"
-    val values = ContentValues().apply {
-        put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/XiaomiAICam")
-        }
-    }
-    val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-    uri?.let {
-        context.contentResolver.openOutputStream(it)?.use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        }
-    }
-}
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(
+                if (isSelected) accentColor.copy(alpha = 0.22f)
+                else Color.White.
