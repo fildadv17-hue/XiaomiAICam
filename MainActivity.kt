@@ -102,6 +102,7 @@ fun XiaomiAiCamScreen() {
     }
 
     val (hwZoom, digitalMultiplier) = RealAiEngine.calculateZoomSplit(totalZoom, hardwareMaxZoom)
+    val previewScale = digitalMultiplier.coerceIn(1f, 6f)
 
     LaunchedEffect(hwZoom, cameraControl) {
         cameraControl?.setZoomRatio(hwZoom)
@@ -126,8 +127,8 @@ fun XiaomiAiCamScreen() {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         AndroidView(
             modifier = Modifier.fillMaxSize().graphicsLayer {
-                scaleX = digitalMultiplier
-                scaleY = digitalMultiplier
+                scaleX = previewScale
+                scaleY = previewScale
             },
             factory = { ctx ->
                 val previewView = PreviewView(ctx)
@@ -328,7 +329,7 @@ fun RetakeReviewScreen(
         LiquidGlassContainer(Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(16.dp)) {
             val title = when (reviewMode) {
                 ReviewMode.WITH_AI -> "WITH AI • ${leicaProfile.label}"
-                ReviewMode.WITHOUT_AI -> "WITHOUT AI • Raw Sensor"
+                ReviewMode.WITHOUT_AI -> "WITHOUT AI • Smooth Zoom"
                 ReviewMode.SPLIT_COMPARE -> "SPLIT: Left Without AI | Right With AI"
             }
             Text(
@@ -463,4 +464,3 @@ fun saveBitmapToGallery(context: Context, bitmap: Bitmap, quality: Int, tag: Str
     }
 }
 // END OF FILE
-
