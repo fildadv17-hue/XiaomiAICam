@@ -17,10 +17,15 @@ enum class LeicaProfile(
 }
 
 enum class PhotoQuality(val label: String, val jpegQuality: Int, val sharpenStrength: Float) {
-    STANDARD("Standard", 82, 0.15f),
-    HIGH("High Pro", 94, 0.35f),
-    AI_ULTRA("AI Ultra 250x", 100, 0.55f)
+    STANDARD("Standard", 82, 0.20f),
+    HIGH("High Pro", 94, 0.40f),
+    AI_ULTRA("AI Ultra 250x", 100, 0.60f)
 }
+
+data class CapturedPhotoPair(
+    val withoutAi: Bitmap,
+    val withAi: Bitmap
+)
 
 object RealAiEngine {
 
@@ -37,37 +42,52 @@ object RealAiEngine {
     }
 
     /**
-     * Applies 250x digital crop, Leica Warm/Cold/Vibrant/Natural grading,
-     * and AI Liquid edge reconstruction.
+     * Generates both versions for the post-capture sidebar:
+     * - withoutAi: Raw digital zoom crop with unprocessed sensor colors
+     * - withAi: Leica color science + micro-contrast + AI detail reconstruction
      */
-    fun processCapturedImage(
+    fun processCapturePair(
         source: Bitmap,
         digitalMultiplier: Float,
         leicaProfile: LeicaProfile,
-        quality: PhotoQuality,
-        aiLiquidEnhanceEnabled: Boolean
-    ): Bitmap {
-        // 1. Digital Crop up to 250x equivalent
-        val cropped = if (digitalMultiplier > 1.01f) {
-            val cropWidth = (source.width / digitalMultiplier).toInt().coerceAtLeast(32)
-            val cropHeight = (source.height / digitalMultiplier).toInt().coerceAtLeast(32)
-            val startX = (source.width - cropWidth) / 2
-            val startY = (source.height - cropHeight) / 2
-            val sub = Bitmap.createBitmap(source, startX, startY, cropWidth, cropHeight)
-            Bitmap.createScaledBitmap(sub, source.width, source.height, true)
+        quality: PhotoQuality
+    ): CapturedPhotoPair {
+        val normalizedSource = limitMaxDimension(source, maxEdge = 2560)
+
+        // 1. WITHOUT AI: Standard raw sensor crop without Leica or AI sharpening
+        val withoutAi = if (digitalMultiplier > 1.01f) {
+            val cropWidth = (normalizedSource.width / digitalMultiplier).toInt().coerceAtLeast(32)
+            val cropHeight = (normalizedSource.height / digitalMultiplier).toInt().coerceAtLeast(32)
+            val startX = (normalizedSource.width - cropWidth) / 2
+            val startY = (normalizedSource.height - cropHeight) / 2
+            val sub = Bitmap.createBitmap(normalizedSource, startX, startY, cropWidth, cropHeight)
+            val scaled = Bitmap.createScaledBitmap(sub, normalizedSource.width, normalizedSource.height, true)
+            if (sub !== normalizedSource && sub !== scaled) sub.recycle()
+            scaled
         } else {
-            source.copy(Bitmap.Config.ARGB_8888, true)
+            normalizedSource.copy(Bitmap.Config.ARGB_8888, false)
         }
 
-        // 2. Apply Leica Color Grading (Warm / Cold / Vibrant / Natural)
-        val graded = applyLeicaColorMatrix(cropped, leicaProfile)
-
-        // 3. Apply AI Detail Sharpening when enabled or zoomed past hardware limits
-        return if (aiLiquidEnhanceEnabled || digitalMultiplier > 1.5f) {
-            applyAiSharpen(graded, strength = quality.sharpenStrength)
-        } else {
-            graded
+        // 2. WITH AI: Apply Leica Color Matrix + AI Detail Sharpening
+        val graded = applyLeicaColorMatrix(withoutAi, leicaProfile)
+        val withAi = applyAiSharpen(graded, strength = quality.sharpenStrength)
+        if (graded !== withAi && graded !== withoutAi) {
+            graded.recycle()
         }
+
+        return CapturedPhotoPair(
+            withoutAi = withoutAi,
+            withAi = withAi
+        )
+    }
+
+    private fun limitMaxDimension(bitmap: Bitmap, maxEdge: Int): Bitmap {
+        val longest = max(bitmap.width, bitmap.height)
+        if (longest <= maxEdge) return bitmap
+        val ratio = maxEdge.toFloat() / longest.toFloat()
+        val targetW = (bitmap.width * ratio).toInt().coerceAtLeast(1)
+        val targetH = (bitmap.height * ratio).toInt().coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
     }
 
     private fun applyLeicaColorMatrix(bitmap: Bitmap, profile: LeicaProfile): Bitmap {
@@ -103,17 +123,18 @@ object RealAiEngine {
         val h = src.height
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(w * h)
-        val outPixels = IntArray(w * h)
         src.getPixels(pixels, 0, w, 0, 0, w, h)
+        val outPixels = pixels.copyOf()
 
         for (y in 1 until h - 1) {
+            val rowOffset = y * w
             for (x in 1 until w - 1) {
-                val idx = y * w + x
+                val idx = rowOffset + x
                 val center = pixels[idx]
-                val top = pixels[(y - 1) * w + x]
-                val bottom = pixels[(y + 1) * w + x]
-                val left = pixels[y * w + (x - 1)]
-                val right = pixels[y * w + (x + 1)]
+                val top = pixels[idx - w]
+                val bottom = pixels[idx + w]
+                val left = pixels[idx - 1]
+                val right = pixels[idx + 1]
 
                 val r = sharpenChannel(Color.red(center), Color.red(top), Color.red(bottom), Color.red(left), Color.red(right), strength)
                 val g = sharpenChannel(Color.green(center), Color.green(top), Color.green(bottom), Color.green(left), Color.green(right), strength)
