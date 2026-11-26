@@ -44,7 +44,7 @@ object RealAiEngine {
     ): CapturedPhotoPair {
         val normalizedSource = limitMaxDimension(source, maxEdge = 2560)
 
-        // 1. WITHOUT AI: Raw sensor zoom crop without Leica color grading or AI sharpening
+        // 1. WITHOUT AI: Raw sensor crop without Leica color grading or AI sharpening
         val withoutAi = if (digitalMultiplier > 1.01f) {
             val cropWidth = (normalizedSource.width / digitalMultiplier).toInt().coerceAtLeast(32)
             val cropHeight = (normalizedSource.height / digitalMultiplier).toInt().coerceAtLeast(32)
