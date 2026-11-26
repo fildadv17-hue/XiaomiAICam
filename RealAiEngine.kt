@@ -1,205 +1,133 @@
-package com.example.xiaomiaicam
+package com.fildadv.xiaomiaicam
 
-import android.content.Context
-import android.graphics.Bitmap
-import java.util.concurrent.Executors
-import kotlin.math.*
+import android.graphics.*
+import kotlin.math.max
+import kotlin.math.min
+
+enum class LeicaProfile(
+    val label: String,
+    val tempShift: Float,
+    val contrast: Float,
+    val saturation: Float
+) {
+    LEICA_WARM("Leica Warm", tempShift = 28f, contrast = 1.12f, saturation = 1.08f),
+    LEICA_COLD("Leica Cold", tempShift = -26f, contrast = 1.10f, saturation = 0.95f),
+    LEICA_VIBRANT("Leica Vibrant", tempShift = 4f, contrast = 1.18f, saturation = 1.28f),
+    LEICA_NATURAL("Leica Natural", tempShift = 0f, contrast = 1.05f, saturation = 1.00f)
+}
+
+enum class PhotoQuality(val label: String, val jpegQuality: Int, val sharpenStrength: Float) {
+    STANDARD("Standard", 82, 0.15f),
+    HIGH("High Pro", 94, 0.35f),
+    AI_ULTRA("AI Ultra 250x", 100, 0.55f)
+}
 
 object RealAiEngine {
-    private val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(4)
-    private val pool = Executors.newFixedThreadPool(cores)
-    var engineName = "SNAPSEED STRUCTURE + TONAL AI"
 
-    fun initLocalModel(ctx: Context) {
-        // Bleskový nativní 8jádrový Snapseed-style engine nepotřebuje pomalé externí soubory
+    /**
+     * Splits requested 1x..250x zoom into:
+     * 1) Hardware CameraX zoom ratio (up to Xiaomi 14T max hardware zoom)
+     * 2) Digital AI crop multiplier for the remaining magnification up to 250x
+     */
+    fun calculateZoomSplit(requestedZoom: Float, hardwareMaxZoom: Float): Pair<Float, Float> {
+        val clampedRequest = requestedZoom.coerceIn(1f, 250f)
+        val hwZoom = min(clampedRequest, hardwareMaxZoom)
+        val digitalMultiplier = max(1f, clampedRequest / hwZoom)
+        return Pair(hwZoom, digitalMultiplier)
     }
 
-    fun processRealAi(ctx: Context, src: Bitmap, scale: Int, depix: Float, structure: Float, tonalContrast: Float): Bitmap {
-        // 1. U-Point Color-Guided De-Pixelate: Rozpustí kostičky ze senzoru podle podobnosti barev a jasu
-        var work = uPointSurfaceClean(src, (2 + depix * 4).roundToInt(), 18 + (depix * 52).toInt())
-
-        // 2. Hladký Catmull-Rom Bicubic Upscaler (vytvoří plynulé křivky bez zubatých schodů)
-        val maxDim = max(work.width, work.height)
-        val sc = min(scale.toFloat(), 2800f / maxDim).coerceAtLeast(1.15f)
-        val dstW = (work.width * sc).roundToInt()
-        val dstH = (work.height * sc).roundToInt()
-        work = catmullRomUpscale(work, dstW, dstH)
-
-        // 3. Jemné dočištění hran po zvětšení
-        if (depix > 0.15f) {
-            work = uPointSurfaceClean(work, max(1, (depix * 3).roundToInt()), 14 + (depix * 34).toInt())
+    /**
+     * Applies 250x digital crop, Leica Warm/Cold/Vibrant/Natural grading,
+     * and AI Liquid edge reconstruction.
+     */
+    fun processCapturedImage(
+        source: Bitmap,
+        digitalMultiplier: Float,
+        leicaProfile: LeicaProfile,
+        quality: PhotoQuality,
+        aiLiquidEnhanceEnabled: Boolean
+    ): Bitmap {
+        // 1. Digital Crop up to 250x equivalent
+        val cropped = if (digitalMultiplier > 1.01f) {
+            val cropWidth = (source.width / digitalMultiplier).toInt().coerceAtLeast(32)
+            val cropHeight = (source.height / digitalMultiplier).toInt().coerceAtLeast(32)
+            val startX = (source.width - cropWidth) / 2
+            val startY = (source.height - cropHeight) / 2
+            val sub = Bitmap.createBitmap(source, startX, startY, cropWidth, cropHeight)
+            Bitmap.createScaledBitmap(sub, source.width, source.height, true)
+        } else {
+            source.copy(Bitmap.Config.ARGB_8888, true)
         }
 
-        // 4. Pravý Snapseed "Structure" + "Tonal Contrast" (vytáhne texturu bez bílých lemů a bez změny celkového jasu)
-        return snapseedStructureAndTonal(work, structure, tonalContrast)
+        // 2. Apply Leica Color Grading (Warm / Cold / Vibrant / Natural)
+        val graded = applyLeicaColorMatrix(cropped, leicaProfile)
+
+        // 3. Apply AI Detail Sharpening when enabled or zoomed past hardware limits
+        return if (aiLiquidEnhanceEnabled || digitalMultiplier > 1.5f) {
+            applyAiSharpen(graded, strength = quality.sharpenStrength)
+        } else {
+            graded
+        }
     }
 
-    // Technologie ve stylu U-Point: Bilaterální 1D+1D separabilní filtr řízený barvou i jasem (bleskově odstraní čtverečky)
-    private fun uPointSurfaceClean(src: Bitmap, radius: Int, thr: Int): Bitmap {
-        if (radius < 1) return src
-        val w = src.width; val h = src.height
-        val p = IntArray(w * h); val tmp = IntArray(w * h); val out = IntArray(w * h)
-        src.getPixels(p, 0, w, 0, 0, w, h)
-        val ch = max(1, h / cores)
+    private fun applyLeicaColorMatrix(bitmap: Bitmap, profile: LeicaProfile): Bitmap {
+        val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-        (0 until cores).map { t ->
-            val y0 = (t * ch).coerceAtMost(h); val y1 = if (t == cores - 1) h else (y0 + ch).coerceAtMost(h)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val row = y * w
-                    for (x in 0 until w) {
-                        val c0 = p[row + x]
-                        val r0 = c0 shr 16 and 0xFF; val g0 = c0 shr 8 and 0xFF; val b0 = c0 and 0xFF
-                        var rS = r0 * 3; var gS = g0 * 3; var bS = b0 * 3; var wS = 3
-                        for (k in -radius..radius) {
-                            if (k == 0) continue
-                            val c = p[row + (x + k).coerceIn(0, w - 1)]
-                            val r = c shr 16 and 0xFF; val g = c shr 8 and 0xFF; val b = c and 0xFF
-                            val dist = abs(r - r0) + abs(g - g0) + abs(b - b0)
-                            if (dist < thr) {
-                                val wt = if (dist < thr shr 1) 2 else 1
-                                rS += r * wt; gS += g * wt; bS += b * wt; wS += wt
-                            }
-                        }
-                        tmp[row + x] = (0xFF shl 24) or ((rS / wS) shl 16) or ((gS / wS) shl 8) or (bS / wS)
-                    }
-                }
-            }
-        }.forEach { it.get() }
+        val colorMatrix = ColorMatrix().apply {
+            setSaturation(profile.saturation)
+        }
 
-        (0 until cores).map { t ->
-            val y0 = (t * ch).coerceAtMost(h); val y1 = if (t == cores - 1) h else (y0 + ch).coerceAtMost(h)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val row = y * w
-                    for (x in 0 until w) {
-                        val c0 = tmp[row + x]
-                        val r0 = c0 shr 16 and 0xFF; val g0 = c0 shr 8 and 0xFF; val b0 = c0 and 0xFF
-                        var rS = r0 * 3; var gS = g0 * 3; var bS = b0 * 3; var wS = 3
-                        for (k in -radius..radius) {
-                            if (k == 0) continue
-                            val c = tmp[(y + k).coerceIn(0, h - 1) * w + x]
-                            val r = c shr 16 and 0xFF; val g = c shr 8 and 0xFF; val b = c and 0xFF
-                            val dist = abs(r - r0) + abs(g - g0) + abs(b - b0)
-                            if (dist < thr) {
-                                val wt = if (dist < thr shr 1) 2 else 1
-                                rS += r * wt; gS += g * wt; bS += b * wt; wS += wt
-                            }
-                        }
-                        out[row + x] = (0xFF shl 24) or ((rS / wS) shl 16) or ((gS / wS) shl 8) or (bS / wS)
-                    }
-                }
-            }
-        }.forEach { it.get() }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+        val c = profile.contrast
+        val t = (1f - c) * 128f
+        val rShift = if (profile.tempShift > 0) profile.tempShift else 0f
+        val bShift = if (profile.tempShift < 0) -profile.tempShift else 0f
+
+        val toneMatrix = ColorMatrix(
+            floatArrayOf(
+                c, 0f, 0f, 0f, t + rShift,
+                0f, c, 0f, 0f, t + (rShift * 0.25f),
+                0f, 0f, c, 0f, t + bShift,
+                0f, 0f, 0f, 1f, 0f
+            )
+        )
+        colorMatrix.postConcat(toneMatrix)
+        paint.colorFilter = ColorMatrixColorFilter(colorMatrix)
+        canvas.drawBitmap(bitmap, 0f, 0f, paint)
+        return output
     }
 
-    private fun crSpline(v0: Float, v1: Float, v2: Float, v3: Float, t: Float): Float {
-        val t2 = t * t; val t3 = t2 * t
-        return 0.5f * ((2f * v1) + (-v0 + v2) * t + (2f * v0 - 5f * v1 + 4f * v2 - v3) * t2 + (-v0 + 3f * v1 - 3f * v2 + v3) * t3)
+    private fun applyAiSharpen(src: Bitmap, strength: Float): Bitmap {
+        val w = src.width
+        val h = src.height
+        val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(w * h)
+        val outPixels = IntArray(w * h)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val idx = y * w + x
+                val center = pixels[idx]
+                val top = pixels[(y - 1) * w + x]
+                val bottom = pixels[(y + 1) * w + x]
+                val left = pixels[y * w + (x - 1)]
+                val right = pixels[y * w + (x + 1)]
+
+                val r = sharpenChannel(Color.red(center), Color.red(top), Color.red(bottom), Color.red(left), Color.red(right), strength)
+                val g = sharpenChannel(Color.green(center), Color.green(top), Color.green(bottom), Color.green(left), Color.green(right), strength)
+                val b = sharpenChannel(Color.blue(center), Color.blue(top), Color.blue(bottom), Color.blue(left), Color.blue(right), strength)
+
+                outPixels[idx] = Color.rgb(r, g, b)
+            }
+        }
+        result.setPixels(outPixels, 0, w, 0, 0, w, h)
+        return result
     }
 
-    // Rychlý separabilní Catmull-Rom 4x4 Upscaler s Anti-Ringing ochranou (žádné čtverečky, čisté křivky)
-    private fun catmullRomUpscale(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
-        val sw = src.width; val sh = src.height
-        val sp = IntArray(sw * sh); src.getPixels(sp, 0, sw, 0, 0, sw, sh)
-        val tmp = IntArray(dstW * sh); val dp = IntArray(dstW * dstH)
-        val xR = sw.toFloat() / dstW; val yR = sh.toFloat() / dstH
-        val hCh = max(1, sh / cores); val vCh = max(1, dstH / cores)
-
-        (0 until cores).map { t ->
-            val y0 = (t * hCh).coerceAtMost(sh); val y1 = if (t == cores - 1) sh else (y0 + hCh).coerceAtMost(sh)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val rI = y * sw; val rO = y * dstW
-                    for (x in 0 until dstW) {
-                        val fx = (x + 0.5f) * xR - 0.5f; val ix = floor(fx).toInt(); val tx = fx - ix
-                        val p0 = sp[rI + (ix - 1).coerceIn(0, sw - 1)]; val p1 = sp[rI + ix.coerceIn(0, sw - 1)]
-                        val p2 = sp[rI + (ix + 1).coerceIn(0, sw - 1)]; val p3 = sp[rI + (ix + 2).coerceIn(0, sw - 1)]
-                        val r = crSpline((p0 shr 16 and 0xFF).toFloat(), (p1 shr 16 and 0xFF).toFloat(), (p2 shr 16 and 0xFF).toFloat(), (p3 shr 16 and 0xFF).toFloat(), tx).roundToInt().coerceIn(0, 255)
-                        val g = crSpline((p0 shr 8 and 0xFF).toFloat(), (p1 shr 8 and 0xFF).toFloat(), (p2 shr 8 and 0xFF).toFloat(), (p3 shr 8 and 0xFF).toFloat(), tx).roundToInt().coerceIn(0, 255)
-                        val b = crSpline((p0 and 0xFF).toFloat(), (p1 and 0xFF).toFloat(), (p2 and 0xFF).toFloat(), (p3 and 0xFF).toFloat(), tx).roundToInt().coerceIn(0, 255)
-                        tmp[rO + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                    }
-                }
-            }
-        }.forEach { it.get() }
-
-        (0 until cores).map { t ->
-            val y0 = (t * vCh).coerceAtMost(dstH); val y1 = if (t == cores - 1) dstH else (y0 + vCh).coerceAtMost(dstH)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val fy = (y + 0.5f) * yR - 0.5f; val iy = floor(fy).toInt(); val ty = fy - iy; val rO = y * dstW
-                    val r0 = (iy - 1).coerceIn(0, sh - 1) * dstW; val r1 = iy.coerceIn(0, sh - 1) * dstW
-                    val r2 = (iy + 1).coerceIn(0, sh - 1) * dstW; val r3 = (iy + 2).coerceIn(0, sh - 1) * dstW
-                    for (x in 0 until dstW) {
-                        val p0 = tmp[r0 + x]; val p1 = tmp[r1 + x]; val p2 = tmp[r2 + x]; val p3 = tmp[r3 + x]
-                        val r = crSpline((p0 shr 16 and 0xFF).toFloat(), (p1 shr 16 and 0xFF).toFloat(), (p2 shr 16 and 0xFF).toFloat(), (p3 shr 16 and 0xFF).toFloat(), ty).roundToInt().coerceIn(0, 255)
-                        val g = crSpline((p0 shr 8 and 0xFF).toFloat(), (p1 shr 8 and 0xFF).toFloat(), (p2 shr 8 and 0xFF).toFloat(), (p3 shr 8 and 0xFF).toFloat(), ty).roundToInt().coerceIn(0, 255)
-                        val b = crSpline((p0 and 0xFF).toFloat(), (p1 and 0xFF).toFloat(), (p2 and 0xFF).toFloat(), (p3 and 0xFF).toFloat(), ty).roundToInt().coerceIn(0, 255)
-                        dp[rO + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                    }
-                }
-            }
-        }.forEach { it.get() }
-        return Bitmap.createBitmap(dstW, dstH, Bitmap.Config.ARGB_8888).apply { setPixels(dp, 0, dstW, 0, 0, dstW, dstH) }
-    }
-
-    // Snapseed "Structure" + "Tonal Contrast": Zvýrazní texturu objektů bez bílých aurol (Edge-Stopping Halo Protection)
-    private fun snapseedStructureAndTonal(src: Bitmap, structure: Float, tonal: Float): Bitmap {
-        val w = src.width; val h = src.height
-        val p = IntArray(w * h); src.getPixels(p, 0, w, 0, 0, w, h); val out = p.clone()
-        val lum = IntArray(w * h) { ((p[it] shr 16 and 0xFF) * 77 + (p[it] shr 8 and 0xFF) * 150 + (p[it] and 0xFF) * 29) shr 8 }
-
-        // Středně-frekvenční vrstva pro Snapseed Structure (poloměr ~6 px)
-        val medBmp = Bitmap.createScaledBitmap(Bitmap.createScaledBitmap(src, max(32, w / 5), max(32, h / 5), true), w, h, true)
-        val pMed = IntArray(w * h); medBmp.getPixels(pMed, 0, w, 0, 0, w, h)
-
-        val structGain = structure * 2.2f
-        val tonalGain = tonal * 1.6f
-        val ch = max(1, (h - 4) / cores)
-
-        (0 until cores).map { t ->
-            val y0 = (2 + t * ch).coerceAtMost(h - 2); val y1 = if (t == cores - 1) h - 2 else (y0 + ch).coerceAtMost(h - 2)
-            pool.submit {
-                for (y in y0 until y1) {
-                    val row = y * w
-                    for (x in 2 until w - 2) {
-                        val i = row + x; val c = p[i]; val lC = lum[i]
-                        val lT = lum[i - w]; val lB = lum[i + w]; val lL = lum[i - 1]; val lR = lum[i + 1]
-
-                        // Směrové vyhlazení podél hrany (proti pixelaci)
-                        val gx = abs(lR - lL); val gy = abs(lB - lT)
-                        val along = if (gx > gy) (lT + lB + lC * 2) shr 2 else (lL + lR + lC * 2) shr 2
-                        val fineDetail = lC - ((lT + lB + lL + lR) shr 2)
-
-                        // Snapseed Structure: rozdíl oproti střední vrstvě tlumený na ostrých přechodech (žádné bílé lemy!)
-                        val cm = pMed[i]
-                        val lMed = ((cm shr 16 and 0xFF) * 77 + (cm shr 8 and 0xFF) * 150 + (cm and 0xFF) * 29) shr 8
-                        val diffMed = lC - lMed
-                        // Edge-stopping funkce: vytáhne jemnou a střední texturu, ale zastaví přepal na silných obrysech
-                        val haloStop = 1f / (1f + (diffMed * diffMed) / 900f)
-                        val structBoost = diffMed * structGain * haloStop
-
-                        // Snapseed Tonal Contrast: nejsilnější ve středních tónech (kolem 128), chrání hluboké stíny před šumem a světla před přepalem
-                        val midtoneWeight = 1f - abs(lC - 128) / 145f
-                        val tonalBoost = fineDetail * tonalGain * midtoneWeight.coerceIn(0.25f, 1f)
-
-                        // Sjednocení s ochranou proti přestřelení (Overshoot Clamp)
-                        val lo = min(min(lT, lB), min(lL, lR)) - 8
-                        val hi = max(max(lT, lB), max(lL, lR)) + 8
-                        val newLum = (along + structBoost + tonalBoost).roundToInt().coerceIn(lo.coerceAtLeast(0), hi.coerceAtMost(255))
-                        val delta = newLum - lC
-
-                        // Zachování sytosti barev (poměrné škálování kanálů jako v U-Pointu místo šedivého přičítání)
-                        val nr = ((c shr 16 and 0xFF) + delta).coerceIn(0, 255)
-                        val ng = ((c shr 8 and 0xFF) + delta).coerceIn(0, 255)
-                        val nb = ((c and 0xFF) + delta).coerceIn(0, 255)
-                        out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
-                    }
-                }
-            }
-        }.forEach { it.get() }
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+    private fun sharpenChannel(c: Int, t: Int, b: Int, l: Int, r: Int, s: Float): Int {
+        val laplacian = (4 * c) - (t + b + l + r)
+        return (c + (laplacian * s)).toInt().coerceIn(0, 255)
     }
 }
