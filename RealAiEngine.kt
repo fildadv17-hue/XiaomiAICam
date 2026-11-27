@@ -17,10 +17,10 @@ enum class LeicaProfile(
     LEICA_NATURAL("Leica Natural", 0f, 1.03f, 1.00f)
 }
 
-enum class PhotoQuality(val label: String, val jpegQuality: Int, val edgePower: Float) {
-    STANDARD("Standard", 85, 0.55f),
-    HIGH("High Pro", 95, 0.85f),
-    AI_ULTRA("AI Ultra 250x", 100, 1.15f)
+enum class PhotoQuality(val label: String, val jpegQuality: Int, val aiDetail: Float) {
+    STANDARD("Standard", 85, 0.65f),
+    HIGH("High Pro", 95, 1.05f),
+    AI_ULTRA("AI Ultra 250x", 100, 1.45f)
 }
 
 data class CapturedPhotoPair(val withoutAi: Bitmap, val withAi: Bitmap)
@@ -43,7 +43,6 @@ object RealAiEngine {
         val targetW = 1440
         val targetH = (targetW * aspect).toInt().coerceAtLeast(1)
 
-        // Extract exact raw sensor crop BEFORE upscaling
         val z = max(1f, digitalMultiplier)
         val cropW = (source.width / z).toInt().coerceIn(48, source.width)
         val cropH = (source.height / z).toInt().coerceIn(48, source.height)
@@ -51,58 +50,136 @@ object RealAiEngine {
         val top = ((source.height - cropH) / 2).coerceAtLeast(0)
         val rawCrop = Bitmap.createBitmap(source, left, top, cropW, cropH)
 
-        // 1. WITHOUT AI: Standard single-pass digital zoom stretch (soft/pixelated)
+        // 1. WITHOUT AI: Unprocessed nearest-neighbor zoom crop (shows raw blocky sensor pixels)
         val withoutAi = Bitmap.createScaledBitmap(rawCrop, targetW, targetH, false)
 
-        // 2. WITH AI: Multi-step 2x Pyramid Super-Resolution + Edge Clamping + Leica Grade
-        val superRes = upscalePyramidAi(rawCrop, targetW, targetH, quality.edgePower)
-        val withAi = applyLeicaColorMatrix(superRes, leicaProfile)
+        // 2. WITH AI: Directional 2x Super-Resolution + Pixel Texture Synthesis + Leica Grade
+        val reconstructed = runSuperResolutionAi(rawCrop, targetW, targetH, quality.aiDetail)
+        val withAi = applyLeicaColorMatrix(reconstructed, leicaProfile)
 
-        if (rawCrop !== source && rawCrop !== withoutAi && rawCrop !== superRes) rawCrop.recycle()
-        if (superRes !== withAi) superRes.recycle()
+        if (rawCrop !== source && rawCrop !== withoutAi && rawCrop !== reconstructed) rawCrop.recycle()
+        if (reconstructed !== withAi) reconstructed.recycle()
 
         return CapturedPhotoPair(withoutAi, withAi)
     }
 
-    /**
-     * Step-by-step 2x upscaling pyramid:
-     * Reconstructs sharp edges and smooths sensor noise at EVERY 2x scale jump
-     * instead of stretching giant blurry blocks at the end.
-     */
-    private fun upscalePyramidAi(
+    private fun runSuperResolutionAi(
         rawCrop: Bitmap,
         targetW: Int,
         targetH: Int,
-        edgePower: Float
+        aiDetail: Float
     ): Bitmap {
-        // Clean raw sensor grain at native small size first
-        var current = bilateralClean(rawCrop, threshold = 28)
+        var current = denoiseFlatRegions(rawCrop, threshold = 24)
 
         while (current.width < targetW || current.height < targetH) {
             val nextW = min(targetW, current.width * 2)
             val nextH = min(targetH, current.height * 2)
 
-            val scaled = Bitmap.createScaledBitmap(current, nextW, nextH, true)
+            // Directional edge-guided 2x upsample + contour synthesis
+            val stepped = directionalUpscale2x(current, nextW, nextH, aiDetail)
             if (current !== rawCrop) current.recycle()
-
-            // Reconstruct crisp edges & clamp halos at this scale level
-            val reconstructed = sharpenAndClampStep(scaled, edgePower)
-            if (scaled !== reconstructed) scaled.recycle()
-
-            current = reconstructed
+            current = stepped
         }
 
-        // Final surface polish so flat skies/walls stay ultra-clean while edges stay razor sharp
-        val polished = bilateralClean(current, threshold = 18)
-        if (current !== polished && current !== rawCrop) current.recycle()
-        return polished
+        val textured = synthesizeMicroDetail(current, aiDetail)
+        if (current !== textured && current !== rawCrop) current.recycle()
+        return textured
     }
 
-    private fun bilateralClean(src: Bitmap, threshold: Int): Bitmap {
+    /**
+     * Edge-directed 2x upscaler:
+     * Measures local horizontal, vertical, and diagonal gradients so edges
+     * are reconstructed as crisp lines instead of square pixel blocks.
+     */
+    private fun directionalUpscale2x(
+        src: Bitmap,
+        outW: Int,
+        outH: Int,
+        detailPower: Float
+    ): Bitmap {
+        val base = Bitmap.createScaledBitmap(src, outW, outH, true)
+        val px = IntArray(outW * outH)
+        base.getPixels(px, 0, outW, 0, 0, outW, outH)
+        base.recycle()
+
+        val out = px.copyOf()
+        val overshoot = (22f * detailPower).toInt()
+
+        for (y in 2 until outH - 2) {
+            val row = y * outW
+            for (x in 2 until outW - 2) {
+                val i = row + x
+                val c = px[i]
+                val l1 = px[i - 1]
+                val r1 = px[i + 1]
+                val t1 = px[i - outW]
+                val b1 = px[i + outW]
+                val l2 = px[i - 2]
+                val r2 = px[i + 2]
+                val t2 = px[i - outW * 2]
+                val b2 = px[i + outW * 2]
+                val tl = px[i - outW - 1]
+                val tr = px[i - outW + 1]
+                val bl = px[i + outW - 1]
+                val br = px[i + outW + 1]
+
+                // Detect edge orientation via luma gradients
+                val gradH = abs(luma(l1) - luma(r1)) + abs(luma(l2) - luma(r2))
+                val gradV = abs(luma(t1) - luma(b1)) + abs(luma(t2) - luma(b2))
+                val gradD1 = abs(luma(tl) - luma(br)) * 2
+                val gradD2 = abs(luma(tr) - luma(bl)) * 2
+
+                val minGrad = min(min(gradH, gradV), min(gradD1, gradD2))
+
+                // Sample along the detected edge direction (lowest gradient)
+                val (eA, eB) = when (minGrad) {
+                    gradH -> Pair(l1, r1)
+                    gradV -> Pair(t1, b1)
+                    gradD1 -> Pair(tl, br)
+                    else -> Pair(tr, bl)
+                }
+
+                // Sample across the edge (highest gradient) to sharpen contour transition
+                val (cA, cB) = when {
+                    gradH >= gradV -> Pair(l1, r1)
+                    else -> Pair(t1, b1)
+                }
+
+                val nr = synthesizeEdgePixel(c, eA, eB, cA, cB, 16, detailPower, overshoot)
+                val ng = synthesizeEdgePixel(c, eA, eB, cA, cB, 8, detailPower, overshoot)
+                val nb = synthesizeEdgePixel(c, eA, eB, cA, cB, 0, detailPower, overshoot)
+
+                out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+            }
+        }
+        return Bitmap.createBitmap(out, outW, outH, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun synthesizeEdgePixel(
+        c: Int, eA: Int, eB: Int, cA: Int, cB: Int,
+        shift: Int, power: Float, overshoot: Int
+    ): Int {
+        val cv = (c shr shift) and 0xFF
+        val alongAvg = (((eA shr shift) and 0xFF) + ((eB shr shift) and 0xFF)) * 0.5f
+        val acrossAvg = (((cA shr shift) and 0xFF) + ((cB shr shift) and 0xFF)) * 0.5f
+
+        // Smooth along the contour while boosting contrast across the contour
+        val smoothed = cv * 0.55f + alongAvg * 0.45f
+        val contourPush = (smoothed - acrossAvg) * (power * 0.95f)
+        val localMin = min(cv, min((cA shr shift) and 0xFF, (cB shr shift) and 0xFF)) - overshoot
+        val localMax = max(cv, max((cA shr shift) and 0xFF, (cB shr shift) and 0xFF)) + overshoot
+
+        return (smoothed + contourPush).toInt()
+            .coerceIn(localMin.coerceAtLeast(0), localMax.coerceAtMost(255))
+    }
+
+    /**
+     * Reconstructs high-frequency micro-detail & luma texture on mid-tone surfaces
+     * while protecting smooth highlights/shadows from grain.
+     */
+    private fun synthesizeMicroDetail(src: Bitmap, detailPower: Float): Bitmap {
         val w = src.width
         val h = src.height
-        if (w < 4 || h < 4) return src.copy(Bitmap.Config.ARGB_8888, false)
-
         val px = IntArray(w * h)
         src.getPixels(px, 0, w, 0, 0, w, h)
         val out = px.copyOf()
@@ -116,44 +193,30 @@ object RealAiEngine {
                 val cg = (c shr 8) and 0xFF
                 val cb = c and 0xFF
 
-                var sr = cr * 3
-                var sg = cg * 3
-                var sb = cb * 3
-                var sw = 3
+                val avgR = (((px[i - 1] shr 16) and 0xFF) + ((px[i + 1] shr 16) and 0xFF) +
+                    ((px[i - w] shr 16) and 0xFF) + ((px[i + w] shr 16) and 0xFF)) * 0.25f
+                val avgG = (((px[i - 1] shr 8) and 0xFF) + ((px[i + 1] shr 8) and 0xFF) +
+                    ((px[i - w] shr 8) and 0xFF) + ((px[i + w] shr 8) and 0xFF)) * 0.25f
+                val avgB = ((px[i - 1] and 0xFF) + (px[i + 1] and 0xFF) +
+                    (px[i - w] and 0xFF) + (px[i + w] and 0xFF)) * 0.25f
 
-                val nbs = intArrayOf(
-                    px[i - w - 1], px[i - w], px[i - w + 1],
-                    px[i - 1],                px[i + 1],
-                    px[i + w - 1], px[i + w], px[i + w + 1]
-                )
+                val diffLuma = abs((cr - avgR) * 0.3f + (cg - avgG) * 0.59f + (cb - avgB) * 0.11f)
+                val boost = if (diffLuma > 3f) detailPower * 0.85f else 0f
 
-                for (n in nbs) {
-                    val nr = (n shr 16) and 0xFF
-                    val ng = (n shr 8) and 0xFF
-                    val nb = n and 0xFF
-                    val diff = abs(cr - nr) + abs(cg - ng) + abs(cb - nb)
-                    if (diff < threshold * 3) {
-                        val wgt = if (diff < threshold) 2 else 1
-                        sr += nr * wgt
-                        sg += ng * wgt
-                        sb += nb * wgt
-                        sw += wgt
-                    }
-                }
-                out[i] = (0xFF shl 24) or ((sr / sw) shl 16) or ((sg / sw) shl 8) or (sb / sw)
+                val nr = (cr + (cr - avgR) * boost).toInt().coerceIn(0, 255)
+                val ng = (cg + (cg - avgG) * boost).toInt().coerceIn(0, 255)
+                val nb = (cb + (cb - avgB) * boost).toInt().coerceIn(0, 255)
+
+                out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
             }
         }
         return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
-    /**
-     * Shock/Clamp Edge Reconstruction:
-     * Pulls blurry transition pixels toward local min/max bounds (tightens blurry zoom edges
-     * without creating ugly white/black halo artifacts).
-     */
-    private fun sharpenAndClampStep(src: Bitmap, power: Float): Bitmap {
+    private fun denoiseFlatRegions(src: Bitmap, threshold: Int): Bitmap {
         val w = src.width
         val h = src.height
+        if (w < 4 || h < 4) return src.copy(Bitmap.Config.ARGB_8888, false)
         val px = IntArray(w * h)
         src.getPixels(px, 0, w, 0, 0, w, h)
         val out = px.copyOf()
@@ -163,61 +226,36 @@ object RealAiEngine {
             for (x in 1 until w - 1) {
                 val i = row + x
                 val c = px[i]
-                val t = px[i - w]
-                val b = px[i + w]
-                val l = px[i - 1]
-                val r = px[i + 1]
-                val tl = px[i - w - 1]
-                val tr = px[i - w + 1]
-                val bl = px[i + w - 1]
-                val br = px[i + w + 1]
-
-                val nr = reconstructChannel(c, t, b, l, r, tl, tr, bl, br, 16, power)
-                val ng = reconstructChannel(c, t, b, l, r, tl, tr, bl, br, 8, power)
-                val nb = reconstructChannel(c, t, b, l, r, tl, tr, bl, br, 0, power)
-
-                out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
+                val cr = (c shr 16) and 0xFF
+                val cg = (c shr 8) and 0xFF
+                val cb = c and 0xFF
+                var sr = cr * 2; var sg = cg * 2; var sb = cb * 2; var sw = 2
+                val nbs = intArrayOf(px[i - w], px[i + w], px[i - 1], px[i + 1])
+                for (n in nbs) {
+                    val nr = (n shr 16) and 0xFF; val ng = (n shr 8) and 0xFF; val nb = n and 0xFF
+                    if (abs(cr - nr) + abs(cg - ng) + abs(cb - nb) < threshold * 3) {
+                        sr += nr; sg += ng; sb += nb; sw++
+                    }
+                }
+                out[i] = (0xFF shl 24) or ((sr / sw) shl 16) or ((sg / sw) shl 8) or (sb / sw)
             }
         }
         return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
-    private fun reconstructChannel(
-        c: Int, t: Int, b: Int, l: Int, r: Int,
-        tl: Int, tr: Int, bl: Int, br: Int,
-        shift: Int, power: Float
-    ): Int {
-        val cv = (c shr shift) and 0xFF
-        val tv = (t shr shift) and 0xFF
-        val bv = (b shr shift) and 0xFF
-        val lv = (l shr shift) and 0xFF
-        val rv = (r shr shift) and 0xFF
-        val tlv = (tl shr shift) and 0xFF
-        val trv = (tr shr shift) and 0xFF
-        val blv = (bl shr shift) and 0xFF
-        val brv = (br shr shift) and 0xFF
-
-        val minN = min(min(min(tv, bv), min(lv, rv)), min(min(tlv, trv), min(blv, brv)))
-        val maxN = max(max(max(tv, bv), max(lv, rv)), max(max(tlv, trv), max(blv, brv)))
-
-        val blur = (tv + bv + lv + rv) * 0.15f + (tlv + trv + blv + brv) * 0.10f
-        val pushed = (cv + (cv - blur) * (power * 1.6f)).toInt()
-
-        // Clamp strictly inside neighborhood min..max so edges become razor crisp with ZERO haloing
-        return pushed.coerceIn(minN, maxN)
+    private fun luma(c: Int): Int {
+        return (((c shr 16) and 0xFF) * 3 + ((c shr 8) and 0xFF) * 6 + (c and 0xFF)) / 10
     }
 
     private fun applyLeicaColorMatrix(bitmap: Bitmap, profile: LeicaProfile): Bitmap {
         val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-
         val matrix = ColorMatrix().apply { setSaturation(profile.saturation) }
         val c = profile.contrast
         val t = (1f - c) * 128f
         val rShift = max(0f, profile.tempShift)
         val bShift = max(0f, -profile.tempShift)
-
         matrix.postConcat(
             ColorMatrix(
                 floatArrayOf(
