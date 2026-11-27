@@ -17,10 +17,10 @@ enum class LeicaProfile(
     LEICA_NATURAL("Leica Natural", 0f, 1.03f, 1.00f)
 }
 
-enum class PhotoQuality(val label: String, val jpegQuality: Int, val aiDetail: Float) {
-    STANDARD("Standard", 85, 0.65f),
-    HIGH("High Pro", 95, 1.05f),
-    AI_ULTRA("AI Ultra 250x", 100, 1.45f)
+enum class PhotoQuality(val label: String, val jpegQuality: Int, val aiStrength: Float) {
+    STANDARD("Standard", 85, 0.8f),
+    HIGH("High Pro", 95, 1.3f),
+    AI_ULTRA("AI Ultra 250x", 100, 1.8f)
 }
 
 data class CapturedPhotoPair(val withoutAi: Bitmap, val withAi: Bitmap)
@@ -50,201 +50,155 @@ object RealAiEngine {
         val top = ((source.height - cropH) / 2).coerceAtLeast(0)
         val rawCrop = Bitmap.createBitmap(source, left, top, cropW, cropH)
 
-        // 1. WITHOUT AI: Unprocessed nearest-neighbor zoom crop (shows raw blocky sensor pixels)
+        // 1. WITHOUT AI: Raw nearest-neighbor pixel blocks (unprocessed)
         val withoutAi = Bitmap.createScaledBitmap(rawCrop, targetW, targetH, false)
 
-        // 2. WITH AI: Directional 2x Super-Resolution + Pixel Texture Synthesis + Leica Grade
-        val reconstructed = runSuperResolutionAi(rawCrop, targetW, targetH, quality.aiDetail)
-        val withAi = applyLeicaColorMatrix(reconstructed, leicaProfile)
+        // 2. WITH AI: True pixel-level EPX contour reconstruction + wide-radius clarity + Leica
+        val superRes = buildAiPixels(rawCrop, targetW, targetH, quality.aiStrength)
+        val withAi = applyLeicaColorMatrix(superRes, leicaProfile)
 
-        if (rawCrop !== source && rawCrop !== withoutAi && rawCrop !== reconstructed) rawCrop.recycle()
-        if (reconstructed !== withAi) reconstructed.recycle()
+        if (rawCrop !== source && rawCrop !== withoutAi && rawCrop !== superRes) rawCrop.recycle()
+        if (superRes !== withAi) superRes.recycle()
 
         return CapturedPhotoPair(withoutAi, withAi)
     }
 
-    private fun runSuperResolutionAi(
+    private fun buildAiPixels(
         rawCrop: Bitmap,
         targetW: Int,
         targetH: Int,
-        aiDetail: Float
+        strength: Float
     ): Bitmap {
-        var current = denoiseFlatRegions(rawCrop, threshold = 24)
+        var cur = rawCrop.copy(Bitmap.Config.ARGB_8888, false)
 
-        while (current.width < targetW || current.height < targetH) {
-            val nextW = min(targetW, current.width * 2)
-            val nextH = min(targetH, current.height * 2)
-
-            // Directional edge-guided 2x upsample + contour synthesis
-            val stepped = directionalUpscale2x(current, nextW, nextH, aiDetail)
-            if (current !== rawCrop) current.recycle()
-            current = stepped
+        // Step A: True pixel-by-pixel Scale2x/EPX contour reconstruction BEFORE any blur
+        while (cur.width * 2 <= targetW && cur.height * 2 <= targetH && cur.width < 900) {
+            val next = scale2xEpx(cur)
+            cur.recycle()
+            cur = next
         }
 
-        val textured = synthesizeMicroDetail(current, aiDetail)
-        if (current !== textured && current !== rawCrop) current.recycle()
-        return textured
+        // Step B: Smoothly reach exact target dimensions
+        if (cur.width != targetW || cur.height != targetH) {
+            val resized = Bitmap.createScaledBitmap(cur, targetW, targetH, true)
+            cur.recycle()
+            cur = resized
+        }
+
+        // Step C: Multi-radius pixel structure & texture synthesis (5x5 clarity + 3x3 crisp detail)
+        val detailed = synthesizePixelStructure(cur, strength)
+        cur.recycle()
+        return detailed
     }
 
     /**
-     * Edge-directed 2x upscaler:
-     * Measures local horizontal, vertical, and diagonal gradients so edges
-     * are reconstructed as crisp lines instead of square pixel blocks.
+     * Real pixel-by-pixel Scale2x (EPX) algorithm:
+     * Inspects top/bottom/left/right neighbors of every single pixel and splits each
+     * pixel into 4 sub-pixels that follow diagonal lines and curves instead of square blocks.
      */
-    private fun directionalUpscale2x(
-        src: Bitmap,
-        outW: Int,
-        outH: Int,
-        detailPower: Float
-    ): Bitmap {
-        val base = Bitmap.createScaledBitmap(src, outW, outH, true)
-        val px = IntArray(outW * outH)
-        base.getPixels(px, 0, outW, 0, 0, outW, outH)
-        base.recycle()
+    private fun scale2xEpx(src: Bitmap): Bitmap {
+        val w = src.width
+        val h = src.height
+        val outW = w * 2
+        val outH = h * 2
+        val inPx = IntArray(w * h)
+        src.getPixels(inPx, 0, w, 0, 0, w, h)
+        val outPx = IntArray(outW * outH)
 
+        for (y in 0 until h) {
+            val yUp = max(0, y - 1)
+            val yDn = min(h - 1, y + 1)
+            for (x in 0 until w) {
+                val xLt = max(0, x - 1)
+                val xRt = min(w - 1, x + 1)
+
+                val p = inPx[y * w + x]
+                val a = inPx[yUp * w + x]
+                val b = inPx[y * w + xRt]
+                val c = inPx[y * w + xLt]
+                val d = inPx[yDn * w + x]
+
+                val p1 = if (similar(c, a) && !similar(c, d) && !similar(a, b)) blend(a, c) else p
+                val p2 = if (similar(a, b) && !similar(a, c) && !similar(b, d)) blend(a, b) else p
+                val p3 = if (similar(d, c) && !similar(d, b) && !similar(c, a)) blend(d, c) else p
+                val p4 = if (similar(b, d) && !similar(b, a) && !similar(d, c)) blend(b, d) else p
+
+                val outRow0 = (y * 2) * outW + (x * 2)
+                val outRow1 = outRow0 + outW
+                outPx[outRow0] = p1
+                outPx[outRow0 + 1] = p2
+                outPx[outRow1] = p3
+                outPx[outRow1 + 1] = p4
+            }
+        }
+        return Bitmap.createBitmap(outPx, outW, outH, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun similar(c1: Int, c2: Int): Boolean {
+        val dr = abs(((c1 shr 16) and 0xFF) - ((c2 shr 16) and 0xFF))
+        val dg = abs(((c1 shr 8) and 0xFF) - ((c2 shr 8) and 0xFF))
+        val db = abs((c1 and 0xFF) - (c2 and 0xFF))
+        return (dr + dg + db) < 55
+    }
+
+    private fun blend(c1: Int, c2: Int): Int {
+        val r = (((c1 shr 16) and 0xFF) + ((c2 shr 16) and 0xFF)) shr 1
+        val g = (((c1 shr 8) and 0xFF) + ((c2 shr 8) and 0xFF)) shr 1
+        val b = ((c1 and 0xFF) + (c2 and 0xFF)) shr 1
+        return (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+    }
+
+    /**
+     * Multi-radius clarity + detail reconstruction:
+     * Compares each pixel against a 4-pixel-wide ring (structure/clarity) AND
+     * 1-pixel-wide neighbors (fine texture) to carve crisp pixel edges.
+     */
+    private fun synthesizePixelStructure(src: Bitmap, strength: Float): Bitmap {
+        val w = src.width
+        val h = src.height
+        val px = IntArray(w * h)
+        src.getPixels(px, 0, w, 0, 0, w, h)
         val out = px.copyOf()
-        val overshoot = (22f * detailPower).toInt()
 
-        for (y in 2 until outH - 2) {
-            val row = y * outW
-            for (x in 2 until outW - 2) {
+        for (y in 4 until h - 4) {
+            val row = y * w
+            for (x in 4 until w - 4) {
                 val i = row + x
                 val c = px[i]
-                val l1 = px[i - 1]
-                val r1 = px[i + 1]
-                val t1 = px[i - outW]
-                val b1 = px[i + outW]
-                val l2 = px[i - 2]
-                val r2 = px[i + 2]
-                val t2 = px[i - outW * 2]
-                val b2 = px[i + outW * 2]
-                val tl = px[i - outW - 1]
-                val tr = px[i - outW + 1]
-                val bl = px[i + outW - 1]
-                val br = px[i + outW + 1]
 
-                // Detect edge orientation via luma gradients
-                val gradH = abs(luma(l1) - luma(r1)) + abs(luma(l2) - luma(r2))
-                val gradV = abs(luma(t1) - luma(b1)) + abs(luma(t2) - luma(b2))
-                val gradD1 = abs(luma(tl) - luma(br)) * 2
-                val gradD2 = abs(luma(tr) - luma(bl)) * 2
+                // Wide 4px radius samples for macro clarity
+                val wL = px[i - 4]; val wR = px[i + 4]
+                val wT = px[i - w * 4]; val wB = px[i + w * 4]
 
-                val minGrad = min(min(gradH, gradV), min(gradD1, gradD2))
+                // Tight 1px radius samples for fine pixel edges
+                val nL = px[i - 1]; val nR = px[i + 1]
+                val nT = px[i - w]; val nB = px[i + w]
 
-                // Sample along the detected edge direction (lowest gradient)
-                val (eA, eB) = when (minGrad) {
-                    gradH -> Pair(l1, r1)
-                    gradV -> Pair(t1, b1)
-                    gradD1 -> Pair(tl, br)
-                    else -> Pair(tr, bl)
-                }
-
-                // Sample across the edge (highest gradient) to sharpen contour transition
-                val (cA, cB) = when {
-                    gradH >= gradV -> Pair(l1, r1)
-                    else -> Pair(t1, b1)
-                }
-
-                val nr = synthesizeEdgePixel(c, eA, eB, cA, cB, 16, detailPower, overshoot)
-                val ng = synthesizeEdgePixel(c, eA, eB, cA, cB, 8, detailPower, overshoot)
-                val nb = synthesizeEdgePixel(c, eA, eB, cA, cB, 0, detailPower, overshoot)
+                val nr = boostPixel(c, wL, wR, wT, wB, nL, nR, nT, nB, 16, strength)
+                val ng = boostPixel(c, wL, wR, wT, wB, nL, nR, nT, nB, 8, strength)
+                val nb = boostPixel(c, wL, wR, wT, wB, nL, nR, nT, nB, 0, strength)
 
                 out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
             }
         }
-        return Bitmap.createBitmap(out, outW, outH, Bitmap.Config.ARGB_8888)
+        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
     }
 
-    private fun synthesizeEdgePixel(
-        c: Int, eA: Int, eB: Int, cA: Int, cB: Int,
-        shift: Int, power: Float, overshoot: Int
+    private fun boostPixel(
+        c: Int,
+        wL: Int, wR: Int, wT: Int, wB: Int,
+        nL: Int, nR: Int, nT: Int, nB: Int,
+        shift: Int, strength: Float
     ): Int {
         val cv = (c shr shift) and 0xFF
-        val alongAvg = (((eA shr shift) and 0xFF) + ((eB shr shift) and 0xFF)) * 0.5f
-        val acrossAvg = (((cA shr shift) and 0xFF) + ((cB shr shift) and 0xFF)) * 0.5f
+        val wideAvg = (((wL shr shift) and 0xFF) + ((wR shr shift) and 0xFF) +
+            ((wT shr shift) and 0xFF) + ((wB shr shift) and 0xFF)) * 0.25f
+        val nearAvg = (((nL shr shift) and 0xFF) + ((nR shr shift) and 0xFF) +
+            ((nT shr shift) and 0xFF) + ((nB shr shift) and 0xFF)) * 0.25f
 
-        // Smooth along the contour while boosting contrast across the contour
-        val smoothed = cv * 0.55f + alongAvg * 0.45f
-        val contourPush = (smoothed - acrossAvg) * (power * 0.95f)
-        val localMin = min(cv, min((cA shr shift) and 0xFF, (cB shr shift) and 0xFF)) - overshoot
-        val localMax = max(cv, max((cA shr shift) and 0xFF, (cB shr shift) and 0xFF)) + overshoot
-
-        return (smoothed + contourPush).toInt()
-            .coerceIn(localMin.coerceAtLeast(0), localMax.coerceAtMost(255))
-    }
-
-    /**
-     * Reconstructs high-frequency micro-detail & luma texture on mid-tone surfaces
-     * while protecting smooth highlights/shadows from grain.
-     */
-    private fun synthesizeMicroDetail(src: Bitmap, detailPower: Float): Bitmap {
-        val w = src.width
-        val h = src.height
-        val px = IntArray(w * h)
-        src.getPixels(px, 0, w, 0, 0, w, h)
-        val out = px.copyOf()
-
-        for (y in 1 until h - 1) {
-            val row = y * w
-            for (x in 1 until w - 1) {
-                val i = row + x
-                val c = px[i]
-                val cr = (c shr 16) and 0xFF
-                val cg = (c shr 8) and 0xFF
-                val cb = c and 0xFF
-
-                val avgR = (((px[i - 1] shr 16) and 0xFF) + ((px[i + 1] shr 16) and 0xFF) +
-                    ((px[i - w] shr 16) and 0xFF) + ((px[i + w] shr 16) and 0xFF)) * 0.25f
-                val avgG = (((px[i - 1] shr 8) and 0xFF) + ((px[i + 1] shr 8) and 0xFF) +
-                    ((px[i - w] shr 8) and 0xFF) + ((px[i + w] shr 8) and 0xFF)) * 0.25f
-                val avgB = ((px[i - 1] and 0xFF) + (px[i + 1] and 0xFF) +
-                    (px[i - w] and 0xFF) + (px[i + w] and 0xFF)) * 0.25f
-
-                val diffLuma = abs((cr - avgR) * 0.3f + (cg - avgG) * 0.59f + (cb - avgB) * 0.11f)
-                val boost = if (diffLuma > 3f) detailPower * 0.85f else 0f
-
-                val nr = (cr + (cr - avgR) * boost).toInt().coerceIn(0, 255)
-                val ng = (cg + (cg - avgG) * boost).toInt().coerceIn(0, 255)
-                val nb = (cb + (cb - avgB) * boost).toInt().coerceIn(0, 255)
-
-                out[i] = (0xFF shl 24) or (nr shl 16) or (ng shl 8) or nb
-            }
-        }
-        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
-    }
-
-    private fun denoiseFlatRegions(src: Bitmap, threshold: Int): Bitmap {
-        val w = src.width
-        val h = src.height
-        if (w < 4 || h < 4) return src.copy(Bitmap.Config.ARGB_8888, false)
-        val px = IntArray(w * h)
-        src.getPixels(px, 0, w, 0, 0, w, h)
-        val out = px.copyOf()
-
-        for (y in 1 until h - 1) {
-            val row = y * w
-            for (x in 1 until w - 1) {
-                val i = row + x
-                val c = px[i]
-                val cr = (c shr 16) and 0xFF
-                val cg = (c shr 8) and 0xFF
-                val cb = c and 0xFF
-                var sr = cr * 2; var sg = cg * 2; var sb = cb * 2; var sw = 2
-                val nbs = intArrayOf(px[i - w], px[i + w], px[i - 1], px[i + 1])
-                for (n in nbs) {
-                    val nr = (n shr 16) and 0xFF; val ng = (n shr 8) and 0xFF; val nb = n and 0xFF
-                    if (abs(cr - nr) + abs(cg - ng) + abs(cb - nb) < threshold * 3) {
-                        sr += nr; sg += ng; sb += nb; sw++
-                    }
-                }
-                out[i] = (0xFF shl 24) or ((sr / sw) shl 16) or ((sg / sw) shl 8) or (sb / sw)
-            }
-        }
-        return Bitmap.createBitmap(out, w, h, Bitmap.Config.ARGB_8888)
-    }
-
-    private fun luma(c: Int): Int {
-        return (((c shr 16) and 0xFF) * 3 + ((c shr 8) and 0xFF) * 6 + (c and 0xFF)) / 10
+        val clarity = (cv - wideAvg) * (strength * 0.55f)
+        val fineEdge = (cv - nearAvg) * (strength * 0.75f)
+        return (cv + clarity + fineEdge).toInt().coerceIn(0, 255)
     }
 
     private fun applyLeicaColorMatrix(bitmap: Bitmap, profile: LeicaProfile): Bitmap {
